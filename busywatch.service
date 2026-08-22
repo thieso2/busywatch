@@ -1,0 +1,10 @@
+[Unit]
+Description=busywatch — warn when the system is too busy
+
+[Service]
+ExecStart=%h/.local/bin/busywatch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

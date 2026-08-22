@@ -1,0 +1,14 @@
+[package]
+name = "busywatch"
+version = "0.1.0"
+edition = "2021"
+description = "Warn when the system is too busy, using kernel PSI triggers (near-zero CPU)"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "s"
