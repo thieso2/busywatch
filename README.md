@@ -110,6 +110,8 @@ busywatch --web                  # or serve from the watcher itself
 
 ![the history UI](doc/ui.png)
 
+*(screenshot shows generated sample data)*
+
 
 
 The page charts cpu / memory / io stall, load, memory used and swap over

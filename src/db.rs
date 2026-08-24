@@ -533,6 +533,17 @@ const GAP_CAP: i64 = 300;
 
 /// Per-timestamp totals per command, with the weight (seconds) each one
 /// stands for.  The building block of every "how much did it use" query.
+/// True when this database has the table at all.  A read-only connection
+/// cannot migrate one, so every query has to cope with an older file.
+fn has_table(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// Per-app rows are authoritative; timestamps predating them (history from
 /// busywatch 0.1, or from before this version) are reconstructed from the
 /// per-pid rows, which undercount many-process apps but are all that exists.
@@ -550,6 +561,21 @@ const INST_CTE: &str = "
          SELECT *, MIN(COALESCE(ts - LAG(ts) OVER (PARTITION BY comm ORDER BY ts), 60), ?5) dt
            FROM inst)";
 
+/// The same, for a database written before per-app rows existed.
+const INST_CTE_PIDS: &str = "
+    WITH inst AS (
+         SELECT ts, comm, SUM(rss_kb) rss, SUM(cpu_pct) cpu,
+                SUM(io_rd_ps) rd, SUM(io_wr_ps) wr, COUNT(DISTINCT pid) pids
+           FROM consumer WHERE ts BETWEEN ?1 AND ?2 AND (?4 = '' OR comm = ?4)
+          GROUP BY ts, comm),
+         w AS (
+         SELECT *, MIN(COALESCE(ts - LAG(ts) OVER (PARTITION BY comm ORDER BY ts), 60), ?5) dt
+           FROM inst)";
+
+fn inst_cte(conn: &Connection) -> &'static str {
+    if has_table(conn, "app_sample") { INST_CTE } else { INST_CTE_PIDS }
+}
+
 /// Top processes in a range by `metric` ("mem" | "cpu" | "io").  Values are
 /// summed across the pids sharing a command name at each instant, then
 /// aggregated over time — so a browser's many processes count as one hog.
@@ -566,13 +592,14 @@ pub fn hogs(
         _ => "rss_max DESC",
     };
     let sql = format!(
-        "{INST_CTE}
+        "{cte}
          SELECT comm,
                 MAX(rss) rss_max, AVG(rss) rss_avg,
                 MAX(cpu) cpu_max, AVG(cpu) cpu_avg, SUM(cpu/100.0*dt) cpu_secs,
                 MAX(rd+wr) io_max, SUM(rd*dt) io_rd, SUM(wr*dt) io_wr,
                 MAX(pids), COUNT(*), MIN(ts), MAX(ts)
-           FROM w GROUP BY comm ORDER BY {order} LIMIT ?3"
+           FROM w GROUP BY comm ORDER BY {order} LIMIT ?3",
+        cte = inst_cte(conn)
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![from, to, limit as i64, "", GAP_CAP], |r| {
@@ -599,15 +626,19 @@ pub fn hogs(
     // query for the whole last sample, not one per row.
     let mut last: HashMap<String, i64> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
+        let sql = if has_table(conn, "app_sample") {
             "SELECT comm, rss_kb FROM app_sample
               WHERE ts = (SELECT MAX(ts) FROM app_sample WHERE ts <= ?1)
              UNION ALL
              SELECT comm, SUM(rss_kb) FROM consumer
               WHERE ts = (SELECT MAX(ts) FROM consumer WHERE ts <= ?1)
                 AND NOT EXISTS (SELECT 1 FROM app_sample a WHERE a.ts <= ?1)
-              GROUP BY comm",
-        )?;
+              GROUP BY comm"
+        } else {
+            "SELECT comm, SUM(rss_kb) FROM consumer
+              WHERE ts = (SELECT MAX(ts) FROM consumer WHERE ts <= ?1) GROUP BY comm"
+        };
+        let mut stmt = conn.prepare(sql)?;
         let it = stmt.query_map([to], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)? as i64)))?;
         for row in it {
             let (c, v) = row?;
@@ -648,12 +679,13 @@ pub fn app_summary(
     to: i64,
 ) -> rusqlite::Result<AppSummary> {
     let sql = format!(
-        "{INST_CTE}
+        "{cte}
          SELECT COUNT(*), MIN(ts), MAX(ts), SUM(dt),
                 MAX(rss), AVG(rss),
                 MAX(cpu), AVG(cpu), SUM(cpu/100.0*dt),
                 MAX(rd+wr), SUM(rd*dt), SUM(wr*dt), MAX(pids)
-           FROM w"
+           FROM w",
+        cte = inst_cte(conn)
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut a = stmt.query_row(params![from, to, 0i64, comm, GAP_CAP], |r| {
@@ -676,17 +708,20 @@ pub fn app_summary(
             pids_seen: 0,
         })
     })?;
-    a.rss_last_kb = conn
-        .query_row(
-            "SELECT COALESCE(
+    let last_sql = if has_table(conn, "app_sample") {
+        "SELECT COALESCE(
                  (SELECT rss_kb FROM app_sample
                    WHERE comm = ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT 1),
                  (SELECT SUM(rss_kb) FROM consumer
                    WHERE comm = ?1
-                     AND ts = (SELECT MAX(ts) FROM consumer WHERE comm = ?1 AND ts <= ?2)))",
-            params![comm, to],
-            |r| r.get::<_, Option<f64>>(0),
-        )
+                     AND ts = (SELECT MAX(ts) FROM consumer WHERE comm = ?1 AND ts <= ?2)))"
+    } else {
+        "SELECT (SELECT SUM(rss_kb) FROM consumer
+                   WHERE comm = ?1
+                     AND ts = (SELECT MAX(ts) FROM consumer WHERE comm = ?1 AND ts <= ?2))"
+    };
+    a.rss_last_kb = conn
+        .query_row(last_sql, params![comm, to], |r| r.get::<_, Option<f64>>(0))
         .ok()
         .flatten()
         .unwrap_or(0.0) as i64;
@@ -781,23 +816,36 @@ pub fn hog_series(
         _ => ("rss_kb", "SUM(rss_kb)"),
     };
     let holes = comms.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!(
-        "WITH inst AS (
-             SELECT ts, comm, {app_expr} v FROM app_sample
+    let apps = has_table(conn, "app_sample");
+    let inner = if apps {
+        format!(
+            "SELECT ts, comm, {app_expr} v FROM app_sample
               WHERE ts BETWEEN ?1 AND ?2 AND comm IN ({holes})
              UNION ALL
              SELECT ts, comm, {pid_expr} v FROM consumer c
               WHERE ts BETWEEN ?1 AND ?2 AND comm IN ({holes})
                 AND NOT EXISTS (SELECT 1 FROM app_sample a WHERE a.ts = c.ts)
-              GROUP BY ts, comm)
-         SELECT (ts/?)*? b, comm, MAX(v) FROM inst GROUP BY b, comm ORDER BY b"
-    );
+              GROUP BY ts, comm"
+        )
+    } else {
+        format!(
+            "SELECT ts, comm, {pid_expr} v FROM consumer
+              WHERE ts BETWEEN ?1 AND ?2 AND comm IN ({holes})
+              GROUP BY ts, comm"
+        )
+    };
+    let sql =
+        format!("WITH inst AS ({inner})
+         SELECT (ts/?)*? b, comm, MAX(v) FROM inst GROUP BY b, comm ORDER BY b");
     let mut stmt = conn.prepare(&sql)?;
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(from), Box::new(to)];
-    // ?1/?2 are named, so the two comm lists that follow are positional from
-    // ?3 onward — each branch of the UNION needs its own copy.
-    for c in comms.iter().chain(comms.iter()) {
-        args.push(Box::new(c.clone()));
+    // ?1/?2 are named, so the comm lists that follow are positional from ?3
+    // onward — one copy per branch of the query.
+    let copies = if apps { 2 } else { 1 };
+    for _ in 0..copies {
+        for c in comms {
+            args.push(Box::new(c.clone()));
+        }
     }
     let b = bucket.max(1);
     args.push(Box::new(b));

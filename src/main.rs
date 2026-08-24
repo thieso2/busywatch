@@ -1019,6 +1019,10 @@ fn cmd_detail(db_path: &Path) -> i32 {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE, so `busywatch hogs | head` panics on the write
+    // that follows the closed pipe.  Restore the default: die quietly.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let sub = args.first().map(String::as_str).unwrap_or("");
     let rest = if args.is_empty() { &[][..] } else { &args[1..] };
