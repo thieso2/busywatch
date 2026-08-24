@@ -86,7 +86,12 @@ h3{font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;lett
 #detail{display:none}
 #detail.open{display:block}
 .err{color:var(--cpu)}
+#offline{background:var(--cpu);color:#fff;padding:6px 16px;font-size:12.5px;
+  position:sticky;top:0;z-index:6}
+#offline[hidden]{display:none}
 </style>
+
+<div id="offline" hidden>busywatch is not responding — the graphs below are stale. <span id="retry"></span></div>
 
 <header>
   <h1>busywatch <span id="host"></span></h1>
@@ -188,10 +193,22 @@ function readHash(){
   if (h.has("metric")) state.metric = h.get("metric");
   if (h.has("proc")) state.sel = h.get("proc");
 }
-function writeHash(){
+function writeHash(replace){
   const h = new URLSearchParams({span: state.span, metric: state.metric});
   if (state.sel) h.set("proc", state.sel);
-  history.replaceState(null, "", "#" + h);
+  const url = "#" + h;
+  if (url === location.hash) return;
+  // A range change is a navigation: pushState so Back returns to it.
+  if (replace) history.replaceState(null, "", url);
+  else history.pushState(null, "", url);
+}
+
+/// Reflect state on the range and metric buttons.
+function syncButtons(){
+  for (const b of $("#ranges").children)
+    b.setAttribute("aria-pressed", +b.dataset.span === state.span);
+  for (const b of $("#metrics").children)
+    b.setAttribute("aria-pressed", b.dataset.metric === state.metric);
 }
 readHash();
 
@@ -430,27 +447,51 @@ function wireHover(host, rowsAt){
 }
 
 // --------------------------------------------------------------------- data
+let loadSeq = 0;
 async function load(){
   const q = new URLSearchParams({span: state.span, points: pointsFor(),
                                  metric: state.metric, limit: 8});
+  const seq = ++loadSeq;
   try {
     const r = await fetch("/api/overview?" + q);
-    state.data = await r.json();
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    // A slow earlier request must not overwrite a newer one's result.
+    if (seq !== loadSeq) return;
+    state.data = data;
+    offline(false);
     render();
   } catch (e){
-    $("#sysSub").innerHTML = `<span class="err">cannot reach busywatch: ${e}</span>`;
+    if (seq === loadSeq) offline(true, e);
   }
+}
+
+// The old failure mode was a grey line in a corner: the graphs kept showing
+// the previous range, so a click looked like it had done nothing.
+let retryTimer = null;
+function offline(down, err){
+  $("#offline").hidden = !down;
+  if (!down){
+    clearTimeout(retryTimer); retryTimer = null;
+    return;
+  }
+  $("#retry").textContent = (err ? String(err).replace(/^\w*Error:?\s*/, "") + " · " : "")
+    + "retrying…";
+  if (!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; load(); }, 3000);
 }
 const pointsFor = () => Math.min(1200, Math.max(60, Math.round((innerWidth || 900) * 0.9)));
 
 function render(){
   const d = state.data;
   if (!d) return;
-  renderCoverage(d);
-  renderGauges(d.live);
-  renderSystem(d);
-  renderHogs(d);
-  renderIncidents(d);
+  // Independently, so a failure in one panel cannot leave the charts frozen
+  // on the previous range with no sign of why.
+  for (const [name, fn] of [["coverage", renderCoverage], ["gauges", () => renderGauges(d.live)],
+                            ["charts", renderSystem], ["apps", renderHogs],
+                            ["incidents", renderIncidents]]){
+    try { fn(d); }
+    catch (e){ console.error("busywatch: rendering " + name + " failed", e); }
+  }
 }
 
 // How far back the history actually goes, and which range buttons can show
@@ -617,7 +658,7 @@ function renderIncidents(d){
 // the range, which pids carried it, and what it set off.
 async function openDetail(comm){
   state.sel = comm;
-  writeHash();
+  writeHash(true);
   const q = new URLSearchParams({comm, span: state.span, points: pointsFor()});
   let d;
   try { d = await (await fetch("/api/proc?" + q)).json(); }
@@ -704,7 +745,7 @@ $("#metrics").innerHTML = METRICS.map(([m, l]) =>
 $("#ranges").onclick = e => {
   const b = e.target.closest("button"); if (!b) return;
   state.span = +b.dataset.span;
-  [...$("#ranges").children].forEach(x => x.setAttribute("aria-pressed", x === b));
+  syncButtons();
   writeHash();
   load();
   if (state.sel) openDetail(state.sel);
@@ -712,7 +753,7 @@ $("#ranges").onclick = e => {
 $("#metrics").onclick = e => {
   const b = e.target.closest("button"); if (!b) return;
   state.metric = b.dataset.metric; state.sort = null;
-  [...$("#metrics").children].forEach(x => x.setAttribute("aria-pressed", x === b));
+  syncButtons();
   writeHash();
   load();
 };
@@ -742,11 +783,23 @@ $("#stackLegend").onclick = e => {
   if (s) openDetail(s.dataset.comm);
 };
 $("#closeDetail").onclick = () => {
-  $("#detail").classList.remove("open"); state.sel = null; writeHash(); render();
+  $("#detail").classList.remove("open"); state.sel = null; writeHash(true); render();
 };
 addEventListener("resize", () => { clearTimeout(window._rz);
   window._rz = setTimeout(render, 150); });
 
+// Back/Forward, a bookmark, or a hand-edited URL must move the view too.
+addEventListener("hashchange", () => {
+  const before = state.span + "/" + state.metric + "/" + state.sel;
+  readHash();
+  if (before === state.span + "/" + state.metric + "/" + state.sel) return;
+  syncButtons();
+  load();
+  if (state.sel) openDetail(state.sel);
+  else $("#detail").classList.remove("open");
+});
+
+syncButtons();
 load().then(() => { if (state.sel) openDetail(state.sel); });
 setInterval(() => { if (!state.paused && !document.hidden) load(); }, 15000);
 </script>
