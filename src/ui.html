@@ -1,0 +1,718 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>busywatch</title>
+<style>
+:root{
+  --bg:#f7f7f8; --panel:#fff; --ink:#16181d; --dim:#6b7280; --line:#e3e5ea;
+  --cpu:#e0503a; --mem:#3f7fd6; --io:#c88a1d; --load:#7a5bd0; --swap:#b0563f;
+  --grid:#eceef2; --hl:rgba(0,0,0,.05);
+  --c0:#3f7fd6; --c1:#e0503a; --c2:#2f9e6e; --c3:#c88a1d; --c4:#7a5bd0;
+  --c5:#159ba0; --c6:#d0567f; --c7:#7c8a99;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#111317; --panel:#181b21; --ink:#e6e8ec; --dim:#98a0ad; --line:#272b33;
+  --cpu:#ff7a5e; --mem:#63a8ff; --io:#e8b552; --load:#a48bff; --swap:#d97a5c;
+  --grid:#20242b; --hl:rgba(255,255,255,.06);
+  --c0:#63a8ff; --c1:#ff7a5e; --c2:#4cc38a; --c3:#e8b552; --c4:#a48bff;
+  --c5:#3fc4c9; --c6:#ff86ab; --c7:#93a1b0;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:13px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);
+  padding:10px 16px;display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
+h1 span{color:var(--dim);font-weight:400}
+.gauges{display:flex;gap:14px;flex-wrap:wrap;margin-left:auto}
+.g{min-width:88px}
+.g b{display:block;font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.g i{font-style:normal;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+.bar{height:3px;background:var(--grid);border-radius:2px;margin-top:3px;overflow:hidden}
+.bar>div{height:100%;width:0;transition:width .3s}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+button{font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);
+  padding:3px 9px;border-radius:6px;cursor:pointer}
+button:hover{background:var(--hl)}
+button[aria-pressed=true]{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+main{padding:14px 16px 60px;display:flex;flex-direction:column;gap:14px;max-width:1500px;margin:0 auto}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.head{display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.head h2{font-size:13px;margin:0;font-weight:600}
+.head .sub{color:var(--dim);font-size:11.5px}
+.head nav{margin-left:auto}
+svg{display:block;width:100%;overflow:visible;touch-action:none}
+.axis{fill:var(--dim);font-size:10px}
+.gridline{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges}
+.crosshair{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 3;pointer-events:none}
+.inc{opacity:.13}
+.legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11.5px;margin-top:4px}
+.legend span{display:inline-flex;align-items:center;gap:5px;cursor:default}
+.sw{width:9px;height:9px;border-radius:2px;display:inline-block}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.4px;
+  cursor:pointer;user-select:none}
+td:first-child,th:first-child{text-align:left}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--hl)}
+tbody tr.sel{background:var(--hl);box-shadow:inset 2px 0 0 var(--ink)}
+.tip{position:fixed;pointer-events:none;z-index:9;background:var(--panel);color:var(--ink);
+  border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:11.5px;
+  box-shadow:0 6px 24px rgba(0,0,0,.18);opacity:0;transition:opacity .1s;max-width:320px}
+.tip b{font-weight:600}
+.tip table{font-size:11.5px}
+.tip td{border:0;padding:1px 0 1px 10px}
+.tip td:first-child{padding-left:0}
+.muted{color:var(--dim)}
+.pill{font-size:10.5px;border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--dim)}
+.tw{overflow-x:auto}
+.toolbar{display:flex;gap:12px;align-items:center;margin:10px 0 2px;flex-wrap:wrap;font-size:11.5px}
+input[type=search]{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);
+  border-radius:6px;padding:4px 9px;min-width:180px}
+input[type=search]:focus{outline:none;border-color:var(--dim)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px;margin:10px 0 14px}
+.tile{border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.tile i{font-style:normal;color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}
+.tile b{display:block;font-size:16px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}
+.tile small{color:var(--dim);font-size:11px}
+h3{font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;letter-spacing:.4px;
+  margin:12px 0 4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+#detail{display:none}
+#detail.open{display:block}
+.err{color:var(--cpu)}
+</style>
+
+<header>
+  <h1>busywatch <span id="host"></span></h1>
+  <nav id="ranges"></nav>
+  <div class="gauges" id="gauges"></div>
+</header>
+
+<main>
+  <section id="sys">
+    <div class="head">
+      <h2>System pressure</h2>
+      <span class="sub" id="sysSub"></span>
+      <nav><button id="pause">pause</button></nav>
+    </div>
+    <div id="charts"></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--cpu)"></i>CPU stall</span>
+      <span><i class="sw" style="background:var(--mem)"></i>memory used</span>
+      <span><i class="sw" style="background:var(--io)"></i>IO stall</span>
+      <span><i class="sw" style="background:var(--load)"></i>load</span>
+      <span class="muted">shaded band = recorded incident</span>
+    </div>
+  </section>
+
+  <section id="hogsec">
+    <div class="head">
+      <h2 id="hogTitle">Apps by memory</h2>
+      <span class="sub" id="hogSub"></span>
+      <nav id="metrics"></nav>
+    </div>
+    <div id="stack"></div>
+    <div class="legend" id="stackLegend"></div>
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="filter apps…" autocomplete="off" spellcheck="false">
+      <span class="muted" id="hogCount"></span>
+      <span class="muted">click an app for its full rundown</span>
+    </div>
+    <div class="tw"><table id="hogs">
+      <thead><tr>
+        <th data-k="comm">app</th>
+        <th data-k="rssLast">rss now</th>
+        <th data-k="rssMax">rss peak</th>
+        <th data-k="rssAvg">rss avg</th>
+        <th data-k="cpuSecs">cpu time</th>
+        <th data-k="cpuMax">cpu peak</th>
+        <th data-k="cpuAvg">cpu avg</th>
+        <th data-k="ioRd">io read</th>
+        <th data-k="ioWr">io write</th>
+        <th data-k="pids">pids</th>
+        <th data-k="last">last seen</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <section id="detail">
+    <div class="head">
+      <h2 id="detailTitle"></h2>
+      <span class="sub" id="detailSub"></span>
+      <nav><button id="closeDetail">close</button></nav>
+    </div>
+    <div class="tiles" id="dTiles"></div>
+    <div class="grid2"><div id="dMem"></div><div id="dCpu"></div></div>
+    <div id="dIo"></div>
+    <div class="grid2"><div id="dPids"></div><div id="dInc"></div></div>
+  </section>
+
+  <section id="incsec">
+    <div class="head"><h2>Incidents</h2><span class="sub" id="incSub"></span></div>
+    <div class="tw"><table id="incidents">
+      <thead><tr><th>when</th><th>kind</th><th>duration</th><th>peak stall</th>
+        <th>min free mem</th><th>culprit</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const RANGES = [["15m",900],["1h",3600],["6h",21600],["24h",86400],["3d",259200],
+                ["7d",604800],["30d",2592000]];
+const METRICS = [["mem","Memory"],["cpu","CPU"],["io","IO"]];
+const PAL = ["--c0","--c1","--c2","--c3","--c4","--c5","--c6","--c7"];
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+let state = {span: 3600, metric: "mem", paused: false, data: null, sel: null,
+             sort: null, sortDir: -1, filter: ""};
+// Command names come from /proc and can contain anything.
+const esc = s => String(s).replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+// The view lives in the URL hash, so a reload — or a link to a colleague on
+// the same machine — comes back to the same range and metric.
+function readHash(){
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.has("span")) state.span = +h.get("span") || state.span;
+  if (h.has("metric")) state.metric = h.get("metric");
+  if (h.has("proc")) state.sel = h.get("proc");
+}
+function writeHash(){
+  const h = new URLSearchParams({span: state.span, metric: state.metric});
+  if (state.sel) h.set("proc", state.sel);
+  history.replaceState(null, "", "#" + h);
+}
+readHash();
+
+// ---------------------------------------------------------------- formatting
+const pad = n => String(n).padStart(2, "0");
+function bytes(kb){ // input: KiB
+  let v = kb * 1024, u = ["B","KB","MB","GB","TB"], i = 0;
+  while (v >= 1000 && i < u.length - 1){ v /= 1000; i++; }
+  return (i ? v.toFixed(v < 10 ? 1 : 0) : v.toFixed(0)) + u[i];
+}
+const rate = b => bytes(b / 1024) + "/s";
+const pct = v => (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + "%";
+function clock(t){
+  const d = new Date(t * 1000);
+  return pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+function stamp(t){
+  const d = new Date(t * 1000);
+  return d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()) +
+         " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+function dur(s){
+  if (s < 0) s = 0;
+  if (s >= 86400) return Math.floor(s/86400) + "d" + pad(Math.floor(s%86400/3600)) + "h";
+  if (s >= 3600) return Math.floor(s/3600) + "h" + pad(Math.floor(s%3600/60)) + "m";
+  if (s >= 60) return Math.floor(s/60) + "m" + pad(s%60) + "s";
+  return s + "s";
+}
+function ago(t){
+  const d = Math.round(Date.now()/1000) - t;
+  return d < 90 ? "just now" : dur(d) + " ago";
+}
+
+// -------------------------------------------------------------------- charts
+// Every chart is plain SVG built from strings: no libraries, no network.
+const PADL = 46, PADR = 42, PADT = 8, PADB = 16;
+
+function xTicks(from, to){
+  const span = to - from, out = [];
+  const steps = [60,300,900,1800,3600,7200,21600,43200,86400,172800,604800];
+  let step = steps.find(s => span / s <= 8) || 604800 * 4;
+  const tz = new Date().getTimezoneOffset() * 60;
+  let t = Math.ceil((from - tz) / step) * step + tz;
+  for (; t <= to; t += step){
+    // Over several days the same "12:00" on every axis is useless — date the
+    // midnight ticks so a day can be told from its neighbour.
+    const d = new Date(t * 1000);
+    const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+    out.push([t, step >= 86400 || midnight ? `${d.getMonth()+1}/${d.getDate()}` : clock(t)]);
+  }
+  return out;
+}
+
+// Typical spacing of a timestamp list; used to tell a real recording gap
+// (busywatch was not running) from ordinary spacing.
+function medianGap(ts){
+  if (ts.length < 2) return Infinity;
+  const d = [];
+  for (let i = 1; i < ts.length; i++) d.push(ts[i] - ts[i-1]);
+  d.sort((a, b) => a - b);
+  return d[Math.floor(d.length / 2)] || Infinity;
+}
+
+function niceMax(v, floor){
+  v = Math.max(v, floor);
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10])
+    if (v <= m * mag) return m * mag;
+  return 10 * mag;
+}
+
+// defs: {key, color, kind:"area"|"line", axis:"l"|"r", width}
+function chart(host, opts){
+  const {rows, defs, from, to, h = 96, fmtL = pct, fmtR = null,
+         maxL = null, maxR = null, incidents = [], title = ""} = opts;
+  const w = host.clientWidth || 900;
+  const iw = w - PADL - PADR, ih = h - PADT - PADB;
+  const X = t => PADL + (t - from) / Math.max(1, to - from) * iw;
+  let ml = maxL, mr = maxR;
+  if (ml == null){
+    ml = 0;
+    for (const d of defs) if (d.axis !== "r") for (const r of rows) ml = Math.max(ml, r[d.key] || 0);
+    ml = niceMax(ml, opts.floorL || 5);
+  }
+  if (mr == null){
+    mr = 0;
+    for (const d of defs) if (d.axis === "r") for (const r of rows) mr = Math.max(mr, r[d.key] || 0);
+    mr = niceMax(mr, opts.floorR || 1);
+  }
+  const Y = (v, ax) => PADT + ih - Math.min(1, (v || 0) / (ax === "r" ? mr : ml)) * ih;
+  const gap = Math.max(opts.bucket || 60, medianGap(rows.map(r => r.t))) * 2.5;
+  let s = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" height="${h}">`;
+
+  for (const inc of incidents){
+    const a = Math.max(from, inc.started), b = Math.min(to, inc.ended == null ? to : inc.ended);
+    if (b < a) continue;
+    const col = inc.kind === "mem" ? "--mem" : inc.kind === "io" ? "--io" : "--cpu";
+    s += `<rect class="inc" x="${X(a).toFixed(1)}" y="${PADT}" width="${Math.max(1.5, X(b)-X(a)).toFixed(1)}" height="${ih}" fill="var(${col})"/>`;
+  }
+  for (let i = 0; i <= 2; i++){
+    const y = PADT + ih - ih * i / 2;
+    s += `<line class="gridline" x1="${PADL}" x2="${w-PADR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"/>`;
+    s += `<text class="axis" x="${PADL-6}" y="${(y+3).toFixed(1)}" text-anchor="end">${fmtL(ml*i/2)}</text>`;
+    if (fmtR) s += `<text class="axis" x="${w-PADR+6}" y="${(y+3).toFixed(1)}">${fmtR(mr*i/2)}</text>`;
+  }
+  for (const [t, lab] of xTicks(from, to))
+    s += `<text class="axis" x="${X(t).toFixed(1)}" y="${h-4}" text-anchor="middle">${lab}</text>`;
+
+  for (const d of defs){
+    const segs = [];
+    let cur = [];
+    let prev = null;
+    for (const r of rows){
+      if (prev !== null && r.t - prev > gap){ segs.push(cur); cur = []; }
+      cur.push(r); prev = r.t;
+    }
+    if (cur.length) segs.push(cur);
+    for (const seg of segs){
+      if (!seg.length) continue;
+      const pts = seg.map(r => `${X(r.t).toFixed(1)},${Y(r[d.key], d.axis).toFixed(1)}`);
+      if (seg.length === 1) pts.push(`${(X(seg[0].t)+1).toFixed(1)},${Y(seg[0][d.key], d.axis).toFixed(1)}`);
+      if (d.kind === "area"){
+        const y0 = (PADT + ih).toFixed(1);
+        s += `<path d="M${X(seg[0].t).toFixed(1)},${y0} L${pts.join(" L")} L${X(seg[seg.length-1].t).toFixed(1)},${y0} Z" fill="var(${d.color})" opacity="${d.opacity ?? .18}"/>`;
+      }
+      s += `<polyline points="${pts.join(" ")}" fill="none" stroke="var(${d.color})" stroke-width="${d.width || 1.4}" stroke-linejoin="round" stroke-linecap="round"${d.dash ? ` stroke-dasharray="${d.dash}"` : ""}/>`;
+    }
+  }
+  s += `<line class="crosshair" id="ch" x1="0" x2="0" y1="${PADT}" y2="${PADT+ih}" style="display:none"/>`;
+  if (title) s += `<text class="axis" x="${PADL}" y="${PADT+9}" style="font-size:10.5px;fill:var(--dim)">${title}</text>`;
+  s += `</svg>`;
+  host.innerHTML = s;
+  host._X = X; host._from = from; host._to = to;
+  return host;
+}
+
+function stackChart(host, series, from, to, bucket, fmt){
+  const w = host.clientWidth || 900, h = 190;
+  const iw = w - PADL - PADR, ih = h - PADT - PADB;
+  const X = t => PADL + (t - from) / Math.max(1, to - from) * iw;
+  const ts = new Set();
+  for (const s of series) for (const [t] of s.points) ts.add(t);
+  const times = [...ts].sort((a, b) => a - b);
+  const maps = series.map(s => new Map(s.points));
+  const totals = times.map(t => maps.reduce((a, m) => a + (m.get(t) || 0), 0));
+  const max = niceMax(Math.max(1, ...totals), 1);
+  const Y = v => PADT + ih - Math.min(1, v / max) * ih;
+  const gap = Math.max(bucket, medianGap(times)) * 2.5;
+  let s = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" height="${h}">`;
+  for (let i = 0; i <= 2; i++){
+    const y = PADT + ih - ih * i / 2;
+    s += `<line class="gridline" x1="${PADL}" x2="${w-PADR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"/>
+          <text class="axis" x="${PADL-6}" y="${(y+3).toFixed(1)}" text-anchor="end">${fmt(max*i/2)}</text>`;
+  }
+  for (const [t, lab] of xTicks(from, to))
+    s += `<text class="axis" x="${X(t).toFixed(1)}" y="${h-4}" text-anchor="middle">${lab}</text>`;
+  // Bottom-up cumulative bands, split wherever the history has a hole.
+  const base = new Map(times.map(t => [t, 0]));
+  series.forEach((ser, i) => {
+    const m = maps[i], col = `var(${PAL[i % PAL.length]})`;
+    let seg = [], prev = null;
+    const flush = () => {
+      if (seg.length){
+        const top = seg.map(t => `${X(t).toFixed(1)},${Y(base.get(t) + (m.get(t)||0)).toFixed(1)}`);
+        const bot = seg.slice().reverse().map(t => `${X(t).toFixed(1)},${Y(base.get(t)).toFixed(1)}`);
+        s += `<path d="M${top.join(" L")} L${bot.join(" L")} Z" fill="${col}" opacity="${state.sel && state.sel !== ser.comm ? .14 : .72}" stroke="${col}" stroke-width=".6"/>`;
+      }
+      seg = [];
+    };
+    for (const t of times){
+      if (prev !== null && t - prev > gap) flush();
+      seg.push(t); prev = t;
+    }
+    flush();
+    for (const t of times) base.set(t, base.get(t) + (m.get(t) || 0));
+  });
+  s += `<line class="crosshair" id="ch" x1="0" x2="0" y1="${PADT}" y2="${PADT+ih}" style="display:none"/></svg>`;
+  host.innerHTML = s;
+  host._X = X; host._from = from; host._to = to;
+  host._stack = {times, maps, series};
+}
+
+// ------------------------------------------------------------------ tooltip
+const tip = $("#tip");
+function showTip(ev, html){
+  tip.innerHTML = html;
+  tip.style.opacity = 1;
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const hideTip = () => { tip.style.opacity = 0;
+  document.querySelectorAll("#ch").forEach(c => c.style.display = "none"); };
+
+function nearest(rows, t){
+  let best = null, bd = Infinity;
+  for (const r of rows){ const d = Math.abs(r.t - t); if (d < bd){ bd = d; best = r; } }
+  return best;
+}
+
+function wireHover(host, rowsAt){
+  const move = ev => {
+    const svg = host.querySelector("svg");
+    if (!svg) return;
+    const box = svg.getBoundingClientRect();
+    const w = svg.viewBox.baseVal.width;
+    const px = (ev.clientX - box.left) / box.width * w;
+    const t = host._from + (px - PADL) / (w - PADL - PADR) * (host._to - host._from);
+    const hit = rowsAt(t, ev);
+    if (!hit){ hideTip(); return; }
+    // Move every visible crosshair, so the three stacked charts read as one.
+    document.querySelectorAll("#ch").forEach(c => {
+      const p = c.ownerSVGElement.parentElement;
+      if (!p._X) return;
+      const x = p._X(hit.t);
+      c.setAttribute("x1", x); c.setAttribute("x2", x); c.style.display = "";
+    });
+    showTip(ev, hit.html);
+  };
+  host.addEventListener("pointermove", move);
+  host.addEventListener("pointerleave", hideTip);
+}
+
+// --------------------------------------------------------------------- data
+async function load(){
+  const q = new URLSearchParams({span: state.span, points: pointsFor(),
+                                 metric: state.metric, limit: 8});
+  try {
+    const r = await fetch("/api/overview?" + q);
+    state.data = await r.json();
+    render();
+  } catch (e){
+    $("#sysSub").innerHTML = `<span class="err">cannot reach busywatch: ${e}</span>`;
+  }
+}
+const pointsFor = () => Math.min(1200, Math.max(60, Math.round((innerWidth || 900) * 0.9)));
+
+function render(){
+  const d = state.data;
+  if (!d) return;
+  renderGauges(d.live);
+  renderSystem(d);
+  renderHogs(d);
+  renderIncidents(d);
+}
+
+function renderGauges(l){
+  if (!l) return;
+  const memUsed = l.memTotal ? (l.memTotal - l.memAvail) / l.memTotal * 100 : 0;
+  const gs = [
+    ["cpu stall", pct(l.cpu.avg60), l.cpu.avg60, "--cpu"],
+    ["memory", pct(memUsed), memUsed, "--mem"],
+    ["mem stall", pct(l.mem.avg60), l.mem.avg60, "--mem"],
+    ["io stall", pct(l.io.avg60), l.io.avg60, "--io"],
+    ["load", l.load.toFixed(2), l.load / Math.max(1, l.cores) * 100, "--load"],
+    ["swap", bytes(l.swapUsed), l.swapTotal ? l.swapUsed / l.swapTotal * 100 : 0, "--swap"],
+  ];
+  $("#gauges").innerHTML = gs.map(([k, v, p, c]) =>
+    `<div class="g"><i>${k}</i><b>${v}</b><div class="bar"><div style="width:${Math.min(100,p).toFixed(0)}%;background:var(${c})"></div></div></div>`).join("");
+  $("#host").textContent = `· ${l.cores} cores · ${bytes(l.memTotal)} ram`;
+}
+
+function renderSystem(d){
+  const rows = d.series;
+  const host = $("#charts");
+  if (!rows.length){
+    host.innerHTML = `<p class="muted">No samples in this range yet. busywatch records a sample every minute once the watcher runs.</p>`;
+    $("#sysSub").textContent = "";
+    return;
+  }
+  const swapSeen = rows.some(r => r.swap > 0);
+  host.innerHTML = `<div id="c1"></div><div id="c2"></div><div id="c3"></div>`
+    + (swapSeen ? `<div id="c4"></div>` : "");
+  const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents};
+  chart($("#c1"), {...common, rows, h: 104, title: "cpu stall % · load",
+    defs: [{key:"cpuMax",color:"--cpu",kind:"area",opacity:.13,width:.8,dash:"2 2"},
+           {key:"cpu",color:"--cpu",kind:"area"},
+           {key:"load",color:"--load",axis:"r",width:1.2}],
+    fmtR: v => v.toFixed(v < 10 ? 1 : 0)});
+  chart($("#c2"), {...common, rows, h: 104, title: "memory used % · mem stall % (right)",
+    maxL: 100,
+    defs: [{key:"memUsed",color:"--mem",kind:"area"},
+           {key:"memUsedMax",color:"--mem",width:.8,dash:"2 2"},
+           {key:"memMax",color:"--cpu",axis:"r",width:1.2}],
+    fmtR: pct, floorR: 5});
+  chart($("#c3"), {...common, rows, h: 92, title: "io stall %",
+    defs: [{key:"ioMax",color:"--io",kind:"area",opacity:.12,width:.8,dash:"2 2"},
+           {key:"io",color:"--io",kind:"area"}]});
+  if (swapSeen)
+    chart($("#c4"), {...common, rows, h: 84, title: "swap used",
+      defs: [{key:"swap",color:"--swap",kind:"area"}], fmtL: bytes, floorL: 1024});
+  const hover = t => {
+    const r = nearest(rows, t);
+    if (!r) return null;
+    return {t: r.t, html: `<b>${stamp(r.t)}</b>
+      <table>
+      <tr><td>cpu stall</td><td>${pct(r.cpu)} <span class="muted">peak ${pct(r.cpuMax)}</span></td></tr>
+      <tr><td>mem stall</td><td>${pct(r.mem)} <span class="muted">peak ${pct(r.memMax)}</span></td></tr>
+      <tr><td>io stall</td><td>${pct(r.io)} <span class="muted">peak ${pct(r.ioMax)}</span></td></tr>
+      <tr><td>memory used</td><td>${pct(r.memUsed)} of ${bytes(r.memTotal)}</td></tr>
+      <tr><td>swap</td><td>${bytes(r.swap)}</td></tr>
+      <tr><td>load</td><td>${r.load.toFixed(2)} <span class="muted">peak ${r.loadMax.toFixed(2)}</span></td></tr>
+      </table>`};
+  };
+  for (const id of ["#c1", "#c2", "#c3", "#c4"]) if ($(id)) wireHover($(id), hover);
+  const inc = d.incidents.length;
+  $("#sysSub").textContent = `${rows.length} points · ${dur(d.bucket)} each · `
+    + `${stamp(d.from)} → ${stamp(d.to)}` + (inc ? ` · ${inc} incident${inc>1?"s":""}` : "");
+}
+
+const METRIC_FMT = {mem: bytes, cpu: pct, io: rate};
+
+function renderHogs(d){
+  const fmt = METRIC_FMT[d.metric];
+  $("#hogTitle").textContent = {mem:"Apps by memory",cpu:"Apps by CPU",io:"Apps by IO"}[d.metric];
+  const stack = d.stack.filter(s => s.points.length);
+  state.stackComms = new Set(stack.map(s => s.comm));
+  if (stack.length) stackChart($("#stack"), stack, d.from, d.to, d.bucket, fmt);
+  else $("#stack").innerHTML = `<p class="muted">No per-process history in this range.</p>`;
+  $("#stackLegend").innerHTML = stack.map((s, i) =>
+    `<span data-comm="${esc(s.comm)}"><i class="sw" style="background:var(${PAL[i%PAL.length]})"></i>${s.comm}</span>`).join("");
+  $("#hogSub").textContent = "summed across processes sharing a name; stacked";
+
+  if (stack.length){
+    const st = $("#stack")._stack;
+    wireHover($("#stack"), t => {
+      let bt = null, bd = Infinity;
+      for (const x of st.times){ const dd = Math.abs(x - t); if (dd < bd){ bd = dd; bt = x; } }
+      if (bt === null) return null;
+      const rowsHtml = st.series.map((s, i) => {
+        const v = st.maps[i].get(bt) || 0;
+        return v ? `<tr><td><i class="sw" style="background:var(${PAL[i%PAL.length]})"></i> ${s.comm}</td><td>${fmt(v)}</td></tr>` : "";
+      }).join("");
+      const total = st.maps.reduce((a, m) => a + (m.get(bt) || 0), 0);
+      return {t: bt, html: `<b>${stamp(bt)}</b><table>${rowsHtml}
+        <tr><td class="muted">total shown</td><td class="muted">${fmt(total)}</td></tr></table>`};
+    });
+  }
+
+  renderRundown(d);
+}
+
+// Every app seen in the range — not just the charted few — filterable and
+// sortable on any column.
+function renderRundown(d){
+  const key = state.sort || {mem:"rssMax",cpu:"cpuSecs",io:"ioRd"}[d.metric];
+  const q = state.filter.trim().toLowerCase();
+  const rows = d.hogs
+    .filter(h => !q || h.comm.toLowerCase().includes(q))
+    .sort((a, b) => {
+      const va = key === "last" ? a.last : a[key], vb = key === "last" ? b.last : b[key];
+      return (typeof va === "string" ? va.localeCompare(vb) : va - vb) * state.sortDir;
+    });
+  $("#hogCount").textContent = q
+    ? `${rows.length} of ${d.hogs.length} apps`
+    : `${d.hogs.length} apps recorded`;
+  $("#hogs tbody").innerHTML = rows.map(h => `
+    <tr data-comm="${esc(h.comm)}" class="${state.sel===h.comm?"sel":""}">
+      <td>${esc(h.comm)} ${h.pids>1?`<span class="pill">${h.pids} pids</span>`:""}</td>
+      <td>${h.rssLast?bytes(h.rssLast):"<span class=muted>—</span>"}</td>
+      <td><b>${bytes(h.rssMax)}</b></td>
+      <td>${bytes(h.rssAvg)}</td>
+      <td>${h.cpuSecs>=1?dur(Math.round(h.cpuSecs)):"<span class=muted>—</span>"}</td>
+      <td>${pct(h.cpuMax)}</td>
+      <td>${pct(h.cpuAvg)}</td>
+      <td>${h.ioRd?bytes(h.ioRd/1024):"<span class=muted>—</span>"}</td>
+      <td>${h.ioWr?bytes(h.ioWr/1024):"<span class=muted>—</span>"}</td>
+      <td>${h.pids}</td>
+      <td class="muted">${ago(h.last)}</td>
+    </tr>`).join("") || `<tr><td colspan="11" class="muted">nothing recorded yet</td></tr>`;
+}
+
+function renderIncidents(d){
+  const rows = d.incidents;
+  $("#incSub").textContent = rows.length ? `${rows.length} in range` : "none in range";
+  $("#incidents tbody").innerHTML = rows.map(i => {
+    const end = i.ended == null ? d.now : i.ended;
+    const col = i.kind === "mem" ? "--mem" : i.kind === "io" ? "--io" : "--cpu";
+    return `<tr data-comm="${i.top || ""}">
+      <td>${stamp(i.started)}</td>
+      <td><i class="sw" style="background:var(${col})"></i> ${i.kind}${i.ended==null?" <span class='pill'>ongoing</span>":""}</td>
+      <td>${dur(end - i.started)}</td>
+      <td>${i.peak == null ? "—" : pct(i.peak)}</td>
+      <td>${i.minMemAvail == null ? "—" : bytes(i.minMemAvail)}</td>
+      <td>${i.top || "<span class=muted>—</span>"}</td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="muted">no incidents recorded</td></tr>`;
+}
+
+// ---------------------------------------------------------------- drilldown
+// Everything recorded about one app: what it added up to, how it behaved over
+// the range, which pids carried it, and what it set off.
+async function openDetail(comm){
+  state.sel = comm;
+  writeHash();
+  const q = new URLSearchParams({comm, span: state.span, points: pointsFor()});
+  let d;
+  try { d = await (await fetch("/api/proc?" + q)).json(); }
+  catch (e){ return; }
+  if (!d || d.comm !== comm) return;
+  const a = d.summary, inc = d.incidents || [];
+  $("#detail").classList.add("open");
+  $("#detailTitle").textContent = comm;
+  $("#detailSub").innerHTML = a.samples
+    ? `${a.pidsSeen} pid${a.pidsSeen===1?"":"s"} seen · present in ${a.samples} samples · `
+      + `${stamp(a.first)} → ${stamp(a.last)}`
+    : `<span class="muted">nothing recorded for this app in this range</span>`;
+
+  // Absolute totals first — "1h12m of CPU" is the number that settles an
+  // argument; a percentage of a moment does not.
+  const window = Math.max(1, d.to - d.from);
+  const tiles = [
+    ["cpu time", a.cpuSecs >= 1 ? dur(Math.round(a.cpuSecs)) : "—",
+     `${(a.cpuSecs / window * 100).toFixed(1)}% of one core, ${dur(window)} range`],
+    ["cpu peak", pct(a.cpuMax), `avg ${pct(a.cpuAvg)} while present`],
+    ["rss peak", bytes(a.rssMax),
+     d.memTotal ? `${(a.rssMax / d.memTotal * 100).toFixed(0)}% of ram` : ""],
+    ["rss now", a.rssLast ? bytes(a.rssLast) : "—",
+     a.rssLast && a.rssAvg ? `avg ${bytes(a.rssAvg)}` : "not in last sample"],
+    ["io read", a.ioRd ? bytes(a.ioRd / 1024) : "—", a.ioMax ? `peak ${rate(a.ioMax)}` : ""],
+    ["io written", a.ioWr ? bytes(a.ioWr / 1024) : "—", ""],
+    ["pids", String(a.pidsSeen), a.pidsMax > 1 ? `up to ${a.pidsMax} at once` : "single process"],
+    ["incidents caused", String(inc.length),
+     inc.length ? inc.map(i => i.kind).filter((v, i, s) => s.indexOf(v) === i).join(", ") : "none"],
+  ];
+  $("#dTiles").innerHTML = tiles.map(([k, v, sub]) =>
+    `<div class="tile"><i>${k}</i><b>${v}</b><small>${sub || "&nbsp;"}</small></div>`).join("");
+
+  const toRows = pts => pts.map(([t, v]) => ({t, v}));
+  const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: inc, h: 112};
+  chart($("#dMem"), {...common, rows: toRows(d.mem), title: "rss",
+    defs: [{key:"v",color:"--mem",kind:"area"}], fmtL: bytes, floorL: 1024});
+  chart($("#dCpu"), {...common, rows: toRows(d.cpu), title: "cpu %",
+    defs: [{key:"v",color:"--cpu",kind:"area"}], fmtL: pct});
+  chart($("#dIo"), {...common, rows: toRows(d.io), h: 96, title: "io read+write per second",
+    defs: [{key:"v",color:"--io",kind:"area"}], fmtL: v => rate(v), floorL: 65536});
+  for (const [id, fmt, label] of [["#dMem", bytes, "rss"], ["#dCpu", pct, "cpu"],
+                                  ["#dIo", rate, "io"]]){
+    const rows = toRows(id === "#dMem" ? d.mem : id === "#dCpu" ? d.cpu : d.io);
+    wireHover($(id), t => {
+      const r = nearest(rows, t);
+      return r && {t: r.t, html: `<b>${stamp(r.t)}</b><table>
+        <tr><td>${comm} ${label}</td><td>${fmt(r.v)}</td></tr></table>`};
+    });
+  }
+
+  $("#dPids").innerHTML = `<h3>pids</h3><div class="tw"><table>
+    <thead><tr><th>pid</th><th>rss peak</th><th>cpu peak</th><th>io peak</th>
+      <th>first seen</th><th>last seen</th></tr></thead><tbody>` +
+    (d.pids.map(p => `<tr><td>${p.pid}</td><td>${bytes(p.rssMax)}</td><td>${pct(p.cpuMax)}</td>
+      <td>${p.ioMax?rate(p.ioMax):"—"}</td><td>${stamp(p.first)}</td>
+      <td>${stamp(p.last)}</td></tr>`).join("")
+     || `<tr><td colspan="6" class="muted">no pids in range</td></tr>`) +
+    `</tbody></table></div>`;
+
+  $("#dInc").innerHTML = `<h3>incidents it was blamed for</h3><div class="tw"><table>
+    <thead><tr><th>when</th><th>kind</th><th>duration</th><th>peak stall</th></tr></thead><tbody>` +
+    (inc.map(i => {
+      const col = i.kind === "mem" ? "--mem" : i.kind === "io" ? "--io" : "--cpu";
+      const end = i.ended == null ? Math.round(Date.now()/1000) : i.ended;
+      return `<tr><td>${stamp(i.started)}</td>
+        <td><i class="sw" style="background:var(${col})"></i> ${i.kind}</td>
+        <td>${dur(end - i.started)}</td>
+        <td>${i.peak == null ? "—" : pct(i.peak)}</td></tr>`;
+    }).join("")
+     || `<tr><td colspan="4" class="muted">none — it never triggered a warning</td></tr>`) +
+    `</tbody></table></div>`;
+
+  render();
+  $("#detail").scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+// --------------------------------------------------------------------- wiring
+$("#ranges").innerHTML = RANGES.map(([l, s]) =>
+  `<button data-span="${s}" aria-pressed="${s===state.span}">${l}</button>`).join("");
+$("#metrics").innerHTML = METRICS.map(([m, l]) =>
+  `<button data-metric="${m}" aria-pressed="${m===state.metric}">${l}</button>`).join("");
+
+$("#ranges").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  state.span = +b.dataset.span;
+  [...$("#ranges").children].forEach(x => x.setAttribute("aria-pressed", x === b));
+  writeHash();
+  load();
+  if (state.sel) openDetail(state.sel);
+};
+$("#metrics").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  state.metric = b.dataset.metric; state.sort = null;
+  [...$("#metrics").children].forEach(x => x.setAttribute("aria-pressed", x === b));
+  writeHash();
+  load();
+};
+$("#pause").onclick = e => {
+  state.paused = !state.paused;
+  e.target.setAttribute("aria-pressed", state.paused);
+  e.target.textContent = state.paused ? "paused" : "pause";
+  if (!state.paused) load();
+};
+$("#filter").oninput = e => { state.filter = e.target.value; if (state.data) renderRundown(state.data); };
+$("#hogs").onclick = e => {
+  const th = e.target.closest("th");
+  if (th){
+    const k = th.dataset.k;
+    state.sortDir = state.sort === k ? -state.sortDir : -1;
+    state.sort = k; render(); return;
+  }
+  const tr = e.target.closest("tbody tr");
+  if (tr && tr.dataset.comm) openDetail(tr.dataset.comm);
+};
+$("#incidents").onclick = e => {
+  const tr = e.target.closest("tbody tr");
+  if (tr && tr.dataset.comm) openDetail(tr.dataset.comm);
+};
+$("#stackLegend").onclick = e => {
+  const s = e.target.closest("[data-comm]");
+  if (s) openDetail(s.dataset.comm);
+};
+$("#closeDetail").onclick = () => {
+  $("#detail").classList.remove("open"); state.sel = null; writeHash(); render();
+};
+addEventListener("resize", () => { clearTimeout(window._rz);
+  window._rz = setTimeout(render, 150); });
+
+load().then(() => { if (state.sel) openDetail(state.sel); });
+setInterval(() => { if (!state.paused && !document.hidden) load(); }, 15000);
+</script>

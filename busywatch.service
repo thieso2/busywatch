@@ -2,7 +2,7 @@
 Description=busywatch — warn when the system is too busy
 
 [Service]
-ExecStart=%h/.local/bin/busywatch
+ExecStart=%h/.local/bin/busywatch --web
 Restart=on-failure
 RestartSec=5
 
