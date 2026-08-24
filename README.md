@@ -149,6 +149,32 @@ The `setcap` must be repeated after every reinstall of the binary. Without the
 capability (or without PSI), busywatch falls back to sampling the pressure
 files every `--poll-secs` — a few small file reads, still negligible.
 
+## Arch package
+
+`packaging/` has a PKGBUILD that builds straight from this repository:
+
+```sh
+cd packaging
+makepkg -si            # build, then install with pacman
+```
+
+It installs the binary to `/usr/bin`, a **user** unit to
+`/usr/lib/systemd/user/busywatch.service`, and sets `cap_sys_resource` in a
+post-install hook (capabilities live on the inode, so it re-applies on every
+upgrade). Then:
+
+```sh
+systemctl --user enable --now busywatch.service
+```
+
+Note `options=('!lto')` in the PKGBUILD: makepkg enables LTO globally, and the
+SQLite that rusqlite compiles from C would reach the Rust link step as bitcode
+it cannot resolve. Rust-side LTO still happens — it is set in the release
+profile in `Cargo.toml`.
+
+To publish it on the AUR, push this PKGBUILD plus a generated `.SRCINFO`
+(`makepkg --printsrcinfo > .SRCINFO`) to `ssh://aur@aur.archlinux.org/busywatch-git.git`.
+
 ## Options
 
 | Flag | Default | Meaning |

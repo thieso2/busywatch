@@ -1,0 +1,61 @@
+# Maintainer: Thies C. Arntzen <thieso@gmail.com>
+pkgname=busywatch-git
+_pkgname=busywatch
+pkgver=r3.abebe4c
+pkgrel=1
+pkgdesc="Warns when the system is too busy, and keeps a per-app history of CPU, memory and IO with a built-in web UI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/thieso2/busywatch"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo' 'git')
+optdepends=(
+  'libnotify: desktop notifications when no Omarchy notification sender is present'
+  'xdg-utils: open the history UI when a warning toast is clicked'
+)
+# rusqlite's `bundled` feature compiles SQLite from C through the cc crate.
+# makepkg's global LTO would hand those objects to the linker as bitcode,
+# which the Rust link step cannot resolve (undefined sqlite3_* symbols).
+# Rust-side LTO is unaffected: it is set in the release profile in Cargo.toml.
+options=('!lto')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+install="$_pkgname.install"
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm0755 "target/release/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
+
+  # The packaged unit runs the binary from /usr/bin, not from ~/.local/bin.
+  sed "s|%h/.local/bin/$_pkgname|/usr/bin/$_pkgname|" "$_pkgname.service" |
+    install -Dm0644 /dev/stdin "$pkgdir/usr/lib/systemd/user/$_pkgname.service"
+
+  install -Dm0644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
+}

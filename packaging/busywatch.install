@@ -1,0 +1,24 @@
+# Registering a PSI trigger needs CAP_SYS_RESOURCE.  Without it busywatch
+# still works, but falls back to polling the pressure files instead of
+# sleeping in poll() until the kernel wakes it.
+_setcap() {
+  setcap cap_sys_resource+ep usr/bin/busywatch 2>/dev/null || cat <<'MSG'
+busywatch: could not set cap_sys_resource on /usr/bin/busywatch.
+It will fall back to polling; to use kernel PSI triggers, run:
+  sudo setcap cap_sys_resource+ep /usr/bin/busywatch
+MSG
+}
+
+post_install() {
+  _setcap
+  cat <<'MSG'
+busywatch is installed. Start it for your user with:
+  systemctl --user enable --now busywatch.service
+The history UI is then at http://127.0.0.1:8787/
+MSG
+}
+
+post_upgrade() {
+  # Capabilities live on the inode, so a replaced binary loses them.
+  _setcap
+}

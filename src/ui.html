@@ -46,6 +46,9 @@ svg{display:block;width:100%;overflow:visible;touch-action:none}
 .gridline{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges}
 .crosshair{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 3;pointer-events:none}
 .inc{opacity:.13}
+.norec{fill:var(--dim);opacity:.05}
+.norec-label{fill:var(--dim);font-size:10px}
+button[data-empty="true"]{opacity:.4}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11.5px;margin-top:4px}
 .legend span{display:inline-flex;align-items:center;gap:5px;cursor:default}
 .sw{width:9px;height:9px;border-radius:2px;display:inline-block}
@@ -96,6 +99,7 @@ h3{font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;lett
     <div class="head">
       <h2>System pressure</h2>
       <span class="sub" id="sysSub"></span>
+      <span class="sub" id="coverage"></span>
       <nav><button id="pause">pause</button></nav>
     </div>
     <div id="charts"></div>
@@ -262,7 +266,7 @@ function niceMax(v, floor){
 // defs: {key, color, kind:"area"|"line", axis:"l"|"r", width}
 function chart(host, opts){
   const {rows, defs, from, to, h = 96, fmtL = pct, fmtR = null,
-         maxL = null, maxR = null, incidents = [], title = ""} = opts;
+         maxL = null, maxR = null, incidents = [], title = "", recordedFrom = null} = opts;
   const w = host.clientWidth || 900;
   const iw = w - PADL - PADR, ih = h - PADT - PADB;
   const X = t => PADL + (t - from) / Math.max(1, to - from) * iw;
@@ -281,6 +285,14 @@ function chart(host, opts){
   const gap = Math.max(opts.bucket || 60, medianGap(rows.map(r => r.t))) * 2.5;
   let s = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" height="${h}">`;
 
+  // An empty left half is otherwise indistinguishable from a broken chart:
+  // say plainly that busywatch was not recording yet.
+  if (recordedFrom && recordedFrom > from){
+    const x = Math.min(X(recordedFrom), w - PADR);
+    s += `<rect class="norec" x="${PADL}" y="${PADT}" width="${Math.max(0, x-PADL).toFixed(1)}" height="${ih}"/>`;
+    if (x - PADL > 90)
+      s += `<text class="norec-label" x="${((PADL+x)/2).toFixed(1)}" y="${(PADT+ih/2).toFixed(1)}" text-anchor="middle">no history before ${stamp(recordedFrom)}</text>`;
+  }
   for (const inc of incidents){
     const a = Math.max(from, inc.started), b = Math.min(to, inc.ended == null ? to : inc.ended);
     if (b < a) continue;
@@ -324,7 +336,7 @@ function chart(host, opts){
   return host;
 }
 
-function stackChart(host, series, from, to, bucket, fmt){
+function stackChart(host, series, from, to, bucket, fmt, recordedFrom){
   const w = host.clientWidth || 900, h = 190;
   const iw = w - PADL - PADR, ih = h - PADT - PADB;
   const X = t => PADL + (t - from) / Math.max(1, to - from) * iw;
@@ -341,6 +353,10 @@ function stackChart(host, series, from, to, bucket, fmt){
     const y = PADT + ih - ih * i / 2;
     s += `<line class="gridline" x1="${PADL}" x2="${w-PADR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"/>
           <text class="axis" x="${PADL-6}" y="${(y+3).toFixed(1)}" text-anchor="end">${fmt(max*i/2)}</text>`;
+  }
+  if (recordedFrom && recordedFrom > from){
+    const x = Math.min(X(recordedFrom), w - PADR);
+    s += `<rect class="norec" x="${PADL}" y="${PADT}" width="${Math.max(0, x-PADL).toFixed(1)}" height="${ih}"/>`;
   }
   for (const [t, lab] of xTicks(from, to))
     s += `<text class="axis" x="${X(t).toFixed(1)}" y="${h-4}" text-anchor="middle">${lab}</text>`;
@@ -430,10 +446,26 @@ const pointsFor = () => Math.min(1200, Math.max(60, Math.round((innerWidth || 90
 function render(){
   const d = state.data;
   if (!d) return;
+  renderCoverage(d);
   renderGauges(d.live);
   renderSystem(d);
   renderHogs(d);
   renderIncidents(d);
+}
+
+// How far back the history actually goes, and which range buttons can show
+// anything at all — a 30d button over 8h of history looks like a dead button.
+function renderCoverage(d){
+  const first = d.span && d.span.first;
+  const have = first ? d.now - first : 0;
+  $("#coverage").textContent = first
+    ? `history: ${dur(have)} back to ${stamp(first)}`
+    : "no history recorded yet";
+  for (const b of $("#ranges").children){
+    const beyond = first && +b.dataset.span > have * 1.5;
+    b.dataset.empty = beyond ? "true" : "false";
+    b.title = beyond ? `only ${dur(have)} of history recorded so far` : "";
+  }
 }
 
 function renderGauges(l){
@@ -463,7 +495,8 @@ function renderSystem(d){
   const swapSeen = rows.some(r => r.swap > 0);
   host.innerHTML = `<div id="c1"></div><div id="c2"></div><div id="c3"></div>`
     + (swapSeen ? `<div id="c4"></div>` : "");
-  const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents};
+  const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents,
+                  recordedFrom: d.span && d.span.first};
   chart($("#c1"), {...common, rows, h: 104, title: "cpu stall % · load",
     defs: [{key:"cpuMax",color:"--cpu",kind:"area",opacity:.13,width:.8,dash:"2 2"},
            {key:"cpu",color:"--cpu",kind:"area"},
@@ -507,7 +540,8 @@ function renderHogs(d){
   $("#hogTitle").textContent = {mem:"Apps by memory",cpu:"Apps by CPU",io:"Apps by IO"}[d.metric];
   const stack = d.stack.filter(s => s.points.length);
   state.stackComms = new Set(stack.map(s => s.comm));
-  if (stack.length) stackChart($("#stack"), stack, d.from, d.to, d.bucket, fmt);
+  if (stack.length)
+    stackChart($("#stack"), stack, d.from, d.to, d.bucket, fmt, d.span && d.span.first);
   else $("#stack").innerHTML = `<p class="muted">No per-process history in this range.</p>`;
   $("#stackLegend").innerHTML = stack.map((s, i) =>
     `<span data-comm="${esc(s.comm)}"><i class="sw" style="background:var(${PAL[i%PAL.length]})"></i>${s.comm}</span>`).join("");
