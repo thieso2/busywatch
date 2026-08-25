@@ -117,6 +117,203 @@ pub fn cores() -> i64 {
     unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as i64 }
 }
 
+// ------------------------------------------------------------------- power
+
+/// What the battery is doing.  An enum rather than the raw sysfs string so a
+/// `Reading` stays `Copy`; unrecognised values become `Unknown` rather than
+/// being dropped, so a kernel that grows a new state still records something.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatStatus {
+    Charging,
+    Discharging,
+    Full,
+    NotCharging,
+    Unknown,
+}
+
+impl BatStatus {
+    pub fn parse(s: &str) -> BatStatus {
+        match s.trim() {
+            "Charging" => BatStatus::Charging,
+            "Discharging" => BatStatus::Discharging,
+            "Full" => BatStatus::Full,
+            "Not charging" => BatStatus::NotCharging,
+            _ => BatStatus::Unknown,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BatStatus::Charging => "Charging",
+            BatStatus::Discharging => "Discharging",
+            BatStatus::Full => "Full",
+            BatStatus::NotCharging => "Not charging",
+            BatStatus::Unknown => "Unknown",
+        }
+    }
+}
+
+/// Mains and battery state.  Every field is optional: a desktop has no
+/// battery, a VM has no power supplies at all, and `None` must stay
+/// distinguishable from a real zero.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Power {
+    /// True when a supply of type Mains (or UPS) reports online.  A USB-C
+    /// charger the firmware does not accept as an adapter reads *false* here
+    /// while still charging — which is exactly the case worth recording.
+    pub ac_online: Option<bool>,
+    pub bat_pct: Option<f64>,
+    pub bat_status: Option<BatStatus>,
+    /// Signed microwatts: negative while discharging, positive while
+    /// charging.  The sysfs counters are unsigned magnitudes, so the sign
+    /// comes from `bat_status`.
+    pub bat_power_uw: Option<i64>,
+}
+
+impl Power {
+    /// One human line, or None when there is nothing to say — a desktop with
+    /// no battery and no mains supply exposed reports nothing rather than a
+    /// row of blanks.
+    pub fn summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        match self.ac_online {
+            Some(true) => parts.push("on AC".to_string()),
+            Some(false) => parts.push("on battery (AC offline)".to_string()),
+            None => {}
+        }
+        if let Some(pct) = self.bat_pct {
+            let mut s = format!("battery {pct:.0}%");
+            if let Some(st) = self.bat_status {
+                s.push(' ');
+                s.push_str(&st.as_str().to_lowercase());
+            }
+            match self.bat_power_uw {
+                Some(uw) if uw != 0 => s.push_str(&format!(" at {:.1}W", uw.abs() as f64 / 1e6)),
+                _ => {}
+            }
+            parts.push(s);
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+}
+
+fn fmt_khz(khz: u64) -> String {
+    if khz >= 1_000_000 {
+        format!("{:.1}GHz", khz as f64 / 1e6)
+    } else {
+        format!("{}MHz", khz / 1000)
+    }
+}
+
+impl CpuClock {
+    pub fn summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(cur) = self.freq_khz {
+            parts.push(match self.freq_max_khz {
+                Some(max) => format!("{} of {} max", fmt_khz(cur), fmt_khz(max)),
+                None => fmt_khz(cur),
+            });
+        }
+        if let Some(n) = self.throttle_count {
+            parts.push(format!(
+                "throttled {n}x / {:.1}s since boot",
+                self.throttle_ms.unwrap_or(0) as f64 / 1000.0
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join("   "))
+    }
+}
+
+pub fn read_power() -> Power {
+    let mut p = Power::default();
+    let Ok(dir) = fs::read_dir("/sys/class/power_supply") else { return p };
+    let mut paths: Vec<_> = dir.flatten().map(|e| e.path()).collect();
+    // Sorted so a two-battery machine always reports the same one.
+    paths.sort();
+    for path in paths {
+        let text = |f: &str| fs::read_to_string(path.join(f)).ok().map(|s| s.trim().to_string());
+        let num = |f: &str| text(f).and_then(|s| s.parse::<i64>().ok());
+        match text("type").as_deref() {
+            Some("Mains") | Some("UPS") => {
+                if num("online") == Some(1) {
+                    p.ac_online = Some(true);
+                } else {
+                    // Never demote a supply already found online.
+                    p.ac_online.get_or_insert(false);
+                }
+            }
+            // First present battery wins; `present` is 0 for an empty bay.
+            Some("Battery") if p.bat_status.is_none() && num("present") != Some(0) => {
+                p.bat_pct = num("capacity").map(|v| v as f64);
+                p.bat_status = text("status").map(|s| BatStatus::parse(&s));
+                // power_now is microwatts directly; batteries that lack it
+                // expose current and voltage instead.
+                let uw = num("power_now").or_else(|| {
+                    let (i, v) = (num("current_now")?, num("voltage_now")?);
+                    Some((i as i128 * v as i128 / 1_000_000) as i64)
+                });
+                p.bat_power_uw = uw.map(|w| {
+                    if p.bat_status == Some(BatStatus::Discharging) { -w.abs() } else { w.abs() }
+                });
+            }
+            _ => {}
+        }
+    }
+    p
+}
+
+// --------------------------------------------------------- clock & throttle
+
+/// CPU frequency and the kernel's cumulative throttle counters.
+///
+/// `freq_khz` is worth recording but NOT worth trusting on its own: on some
+/// platforms `scaling_cur_freq` is stuck at the minimum permanently, under
+/// load included.  `freq_max_khz` is the reliable half — when something caps
+/// the CPU in software it shows up there — and the throttle counters are
+/// cumulative since boot, so it is the *delta* between two samples that says
+/// whether the window throttled.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct CpuClock {
+    pub freq_khz: Option<u64>,
+    pub freq_max_khz: Option<u64>,
+    pub throttle_count: Option<u64>,
+    pub throttle_ms: Option<u64>,
+}
+
+pub fn read_cpu_clock() -> CpuClock {
+    let mut c = CpuClock::default();
+    let (mut cur, mut ncur, mut max, mut nmax) = (0u64, 0u64, 0u64, 0u64);
+    for i in 0..cores() {
+        let base = format!("/sys/devices/system/cpu/cpu{i}/cpufreq");
+        let rd = |f: &str| {
+            fs::read_to_string(format!("{base}/{f}")).ok().and_then(|s| s.trim().parse::<u64>().ok())
+        };
+        if let Some(v) = rd("scaling_cur_freq") {
+            cur += v;
+            ncur += 1;
+        }
+        if let Some(v) = rd("scaling_max_freq") {
+            max += v;
+            nmax += 1;
+        }
+    }
+    if ncur > 0 {
+        c.freq_khz = Some(cur / ncur);
+    }
+    if nmax > 0 {
+        c.freq_max_khz = Some(max / nmax);
+    }
+    // These are package-wide counters; cpu0 carries them for the single-socket
+    // machines this runs on.  Absent entirely on AMD and in VMs.
+    let rd = |f: &str| {
+        fs::read_to_string(format!("/sys/devices/system/cpu/cpu0/thermal_throttle/{f}"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    };
+    c.throttle_count = rd("package_throttle_count");
+    c.throttle_ms = rd("package_throttle_total_time_ms");
+    c
+}
+
 // ---------------------------------------------------------------- sweeping
 
 pub struct ProcSnap {

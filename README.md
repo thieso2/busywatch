@@ -45,7 +45,10 @@ busywatch records into an SQLite database at
 `--no-db`):
 
 * a **heartbeat sample every `--sample-secs`** (default 60 s) — all three
-  pressures, load, memory and swap; a row **per application** (every process
+  pressures, load, memory and swap; **power** (mains online, battery percent,
+  charge/discharge state and the signed watts flowing) and **clock** (mean and
+  maximum CPU frequency, and the kernel's cumulative throttle counters); a row
+  **per application** (every process
   summed by command name, so a browser's 20 renderers are one row); and rows
   for the individual processes behind the notable apps;
 * the same sample every `--poll-secs` (default 10 s) **while an incident is

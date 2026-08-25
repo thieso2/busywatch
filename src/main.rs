@@ -386,7 +386,13 @@ impl Watcher {
     /// Returns true while any incident is active, so the caller re-checks at
     /// the faster cadence instead of waiting for the next kernel event.
     fn tick(&mut self) -> bool {
-        let r = Reading { psi: read_pressures(), mem: read_meminfo(), load1: load1() };
+        let r = Reading {
+            psi: read_pressures(),
+            mem: read_meminfo(),
+            load1: load1(),
+            power: sample::read_power(),
+            clock: sample::read_cpu_clock(),
+        };
 
         // Closing comes first: an incident that just ended must not hold the
         // loop at the busy cadence for another round.
@@ -976,6 +982,12 @@ fn cmd_detail(db_path: &Path) -> i32 {
             String::new()
         }
     );
+    if let Some(l) = sample::read_power().summary() {
+        println!("power {l}");
+    }
+    if let Some(l) = sample::read_cpu_clock().summary() {
+        println!("cpu   {l}");
+    }
 
     print!("\nsampling processes for 1s…");
     let _ = std::io::stdout().flush();

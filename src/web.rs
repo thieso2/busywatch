@@ -419,12 +419,16 @@ fn incident_json(r: &db::IncidentRow) -> String {
 fn live_json() -> String {
     let p = read_pressures();
     let m = read_meminfo();
+    let pw = sample::read_power();
+    let ck = sample::read_cpu_clock();
     format!(
         "{{\"cpu\":{{\"avg10\":{},\"avg60\":{},\"avg300\":{}}},\
           \"mem\":{{\"avg10\":{},\"avg60\":{},\"avg300\":{}}},\
           \"io\":{{\"avg10\":{},\"avg60\":{},\"avg300\":{}}},\
           \"load\":{},\"cores\":{},\"memTotal\":{},\"memAvail\":{},\
-          \"swapTotal\":{},\"swapUsed\":{}}}",
+          \"swapTotal\":{},\"swapUsed\":{},\
+          \"acOnline\":{},\"batPct\":{},\"batStatus\":{},\"batPowerUw\":{},\
+          \"cpuFreqKhz\":{},\"cpuFreqMaxKhz\":{},\"throttleCount\":{},\"throttleMs\":{}}}",
         json_num(p.cpu.avg10),
         json_num(p.cpu.avg60),
         json_num(p.cpu.avg300),
@@ -439,8 +443,26 @@ fn live_json() -> String {
         m.total_kb,
         m.avail_kb,
         m.swap_total_kb,
-        m.swap_used_kb
+        m.swap_used_kb,
+        match pw.ac_online {
+            Some(b) => (b as i32).to_string(),
+            None => "null".into(),
+        },
+        json_opt_num(pw.bat_pct),
+        match pw.bat_status {
+            Some(s) => json_str(s.as_str()),
+            None => "null".into(),
+        },
+        opt_i64(pw.bat_power_uw),
+        opt_i64(ck.freq_khz.map(|v| v as i64)),
+        opt_i64(ck.freq_max_khz.map(|v| v as i64)),
+        opt_i64(ck.throttle_count.map(|v| v as i64)),
+        opt_i64(ck.throttle_ms.map(|v| v as i64)),
     )
+}
+
+fn opt_i64(v: Option<i64>) -> String {
+    v.map(|v| v.to_string()).unwrap_or_else(|| "null".into())
 }
 
 fn num(q: &HashMap<String, String>, key: &str, default: i64) -> i64 {

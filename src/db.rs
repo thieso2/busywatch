@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags};
 
-use crate::sample::{io_rate, top_by, Consumer, MemInfo, Pressures};
+use crate::sample::{io_rate, top_by, Consumer, CpuClock, MemInfo, Power, Pressures};
 use crate::util::unix_now;
 
 /// What kind of resource an incident is about.
@@ -70,6 +70,8 @@ pub struct Reading {
     pub psi: Pressures,
     pub mem: MemInfo,
     pub load1: f64,
+    pub power: Power,
+    pub clock: CpuClock,
 }
 
 fn ensure_columns(conn: &Connection, table: &str, cols: &[(&str, &str)]) -> rusqlite::Result<()> {
@@ -205,8 +207,11 @@ impl Db {
         tx.execute(
             "INSERT INTO sample (incident_id, ts, avg10, avg60, load1,
                                  mem_avg10, mem_avg60, io_avg10, io_avg60,
-                                 mem_total_kb, mem_avail_kb, swap_total_kb, swap_used_kb)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                                 mem_total_kb, mem_avail_kb, swap_total_kb, swap_used_kb,
+                                 ac_online, bat_pct, bat_status, bat_power_uw,
+                                 cpu_freq_khz, cpu_freq_max_khz, throttle_count, throttle_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
+                     ?14,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 incident_id,
                 ts,
@@ -221,6 +226,14 @@ impl Db {
                 r.mem.avail_kb as i64,
                 r.mem.swap_total_kb as i64,
                 r.mem.swap_used_kb as i64,
+                r.power.ac_online.map(|b| b as i64),
+                r.power.bat_pct,
+                r.power.bat_status.map(|s| s.as_str()),
+                r.power.bat_power_uw,
+                r.clock.freq_khz.map(|v| v as i64),
+                r.clock.freq_max_khz.map(|v| v as i64),
+                r.clock.throttle_count.map(|v| v as i64),
+                r.clock.throttle_ms.map(|v| v as i64),
             ],
         )?;
         let sid = tx.last_insert_rowid();
@@ -304,7 +317,15 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              mem_avg10 REAL, mem_avg60 REAL,
              io_avg10 REAL, io_avg60 REAL,
              mem_total_kb INTEGER, mem_avail_kb INTEGER,
-             swap_total_kb INTEGER, swap_used_kb INTEGER
+             swap_total_kb INTEGER, swap_used_kb INTEGER,
+             -- Power: ac_online is 0/1, bat_power_uw is signed (negative
+             -- while discharging).  NULL throughout on a machine with no
+             -- battery or no power supplies at all.
+             ac_online INTEGER, bat_pct REAL, bat_status TEXT, bat_power_uw INTEGER,
+             -- Clock: freq_* are means across CPUs in kHz; throttle_* are
+             -- cumulative since boot, so take deltas between samples.
+             cpu_freq_khz INTEGER, cpu_freq_max_khz INTEGER,
+             throttle_count INTEGER, throttle_ms INTEGER
          );
          CREATE TABLE IF NOT EXISTS app_sample (
              ts INTEGER NOT NULL,
@@ -348,6 +369,14 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             ("mem_avail_kb", "INTEGER"),
             ("swap_total_kb", "INTEGER"),
             ("swap_used_kb", "INTEGER"),
+            ("ac_online", "INTEGER"),
+            ("bat_pct", "REAL"),
+            ("bat_status", "TEXT"),
+            ("bat_power_uw", "INTEGER"),
+            ("cpu_freq_khz", "INTEGER"),
+            ("cpu_freq_max_khz", "INTEGER"),
+            ("throttle_count", "INTEGER"),
+            ("throttle_ms", "INTEGER"),
         ],
     )?;
     ensure_columns(conn, "consumer", &[("ts", "INTEGER NOT NULL DEFAULT 0")])?;
