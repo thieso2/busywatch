@@ -28,10 +28,45 @@ then sends an **all-clear toast** ("Memory back to normal", with duration, peak
 and culprit) that replaces the warning. Each resource has its own toast
 identity, so a memory warning never silently erases a CPU one.
 
-**Clicking either toast opens the history UI** in your browser, on the resource
-that raised it and a range wide enough to show the whole incident — a memory
-warning lands on the memory hogs, a CPU one on the CPU hogs. With `--no-db` or
-no `--web`, the click falls back to a detail snapshot in a floating terminal.
+**Clicking either toast opens the history UI** as a chromeless overlay window
+— no tabs, no address bar, just the page — on the resource that raised it and
+a range wide enough to show the whole incident: a memory warning lands on the
+memory hogs, a CPU one on the CPU hogs. With `--no-db` or no `--web`, the
+click falls back to a detail snapshot in a floating terminal.
+
+The overlay is a Chromium-family browser in `--app` mode, launched through
+Omarchy's `omarchy-launch-webapp` when present and directly otherwise, with
+`xdg-open` as the last resort. It is opened on a `busywatch.localhost` alias
+rather than `127.0.0.1`: `--class` is X11-only, so on Wayland the window's
+app_id comes from the URL's host, and the alias is what gives the overlay a
+class of its own for a compositor rule to match. Any name under `.localhost`
+resolves to loopback with no `/etc/hosts` entry. To float and size it under
+Hyprland:
+
+```lua
+o.window({ class = "^.+busywatch\\.localhost.*-Default$" }, {
+  float = true,
+  center = true,
+  size = { 1200, 800 },
+})
+```
+
+Match on the class, not the title: a Chromium app window is titled after its
+URL until the page loads, and window rules are evaluated when the window maps.
+
+## Tray icon
+
+busywatch registers a **StatusNotifierItem**, so it appears in any tray that
+implements the spec — Waybar, quickshell, KDE, GNOME with an extension. The
+icon is the current verdict: a quiet green dot while nothing is stalling, and
+amber, red or blue while a CPU, memory or IO incident runs. Its tooltip
+carries the live pressures and load, and clicking it opens the same overlay a
+toast click does. `--no-tray` turns it off.
+
+The D-Bus is hand-rolled — no bindings, no async runtime, the same way the web
+server here is hand-rolled HTTP — so the dependency list stays `libc` and
+`rusqlite` and the binary stays under 2 MB. No session bus or no tray host
+means no icon and a log line, never a failure to start.
 
 The click is delivered through Omarchy's `omarchy-notification-send --exec`
 when that is installed (it carries the command as data, so a toast restored
@@ -196,6 +231,7 @@ To publish it on the AUR, push this PKGBUILD plus a generated `.SRCINFO`
 | `--retain-pid-days` | 3 | keep the bulky per-process rows only this long |
 | `--web [ADDR:]PORT` | off | serve the history UI while watching |
 | `--no-notify` | | log only, no desktop notification |
+| `--no-tray` | | no tray icon |
 | `--db PATH` | `~/.local/state/busywatch/history.db` | history database |
 | `--no-db` | | don't record history |
 

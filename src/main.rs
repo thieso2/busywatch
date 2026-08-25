@@ -21,6 +21,8 @@
 //! load, memory, and the top CPU/IO/RSS processes — so `busywatch web` can
 //! chart minutes, hours or days of history rather than incidents alone.
 
+mod dbus;
+mod tray;
 mod db;
 mod sample;
 mod util;
@@ -60,6 +62,7 @@ struct Config {
     notify: bool,           // send a desktop notification (else log only)
     db: Option<PathBuf>,    // history database (None = disabled)
     web: Option<String>,    // serve the UI on this address while watching
+    tray: bool,             // show a StatusNotifierItem tray icon
 }
 
 impl Default for Config {
@@ -78,6 +81,7 @@ impl Default for Config {
             notify: true,
             db: Some(default_db_path()),
             web: None,
+            tray: true,
         }
     }
 }
@@ -97,7 +101,7 @@ fn usage() -> ! {
          \x20                [--mem-sustained PCT] [--io-sustained PCT] [--mem-free-pct PCT]\n\
          \x20                [--cooldown SECS] [--top N] [--poll-secs N] [--sample-secs N]\n\
          \x20                [--retain-days N] [--retain-pid-days N] [--web [ADDR:]PORT]\n\
-         \x20                [--no-notify]\n\
+         \x20                [--no-notify] [--no-tray]\n\
          \x20                [--db PATH] [--no-db]\n\
          \x20      busywatch history [N] [--db PATH]      recent busy incidents\n\
          \x20      busywatch hogs [--by mem|cpu|io] [--since 24h] [--top N]\n\
@@ -148,6 +152,7 @@ fn parse_args(args: Vec<String>) -> Config {
                 });
             }
             "--no-notify" => cfg.notify = false,
+            "--no-tray" => cfg.tray = false,
             "--db" => cfg.db = Some(PathBuf::from(val(&mut args))),
             "--no-db" => cfg.db = None,
             "-h" | "--help" => usage(),
@@ -181,15 +186,59 @@ fn detail_snapshot() -> String {
     )
 }
 
-/// Hand a URL to the desktop's browser.  Falls back to the terminal report
-/// when there is no handler (a headless or minimal session).
+/// The loopback alias the overlay is opened under.
+///
+/// `--class` is X11-only: on Wayland a Chromium-family app window derives its
+/// app_id from the URL's *host*, so an overlay opened on `127.0.0.1` lands in
+/// the same class as every other local web app and cannot be told apart by a
+/// compositor rule. Any name under `.localhost` resolves to loopback without
+/// touching /etc/hosts, and the server does not care which Host it is asked
+/// for — so this buys a window class of its own for free.
+const OVERLAY_HOST: &str = "busywatch.localhost";
+
+/// Rewrite a loopback URL to the alias. Anything else is left alone: a UI
+/// deliberately bound to a real address must stay reachable at that address.
+fn overlay_url(url: &str) -> String {
+    for host in ["127.0.0.1", "localhost", "[::1]"] {
+        let from = format!("://{host}");
+        if url.starts_with(&format!("http{from}")) || url.contains(&format!("{from}:")) {
+            return url.replacen(&from, &format!("://{OVERLAY_HOST}"), 1);
+        }
+    }
+    url.to_string()
+}
+
+/// Open the history UI as a chromeless overlay rather than a browser tab.
+///
+/// `--app=URL` gives a window with no tabs, address bar or menu — the page
+/// and nothing else — and `--class` labels it so Hyprland can float it. The
+/// ladder is: Omarchy's own web-app launcher, then any Chromium-family
+/// browser directly, then `xdg-open` (an ordinary tab, but it opens), then
+/// the terminal report. Each rung is a real fallback, not a retry.
 fn open_url(url: &str) {
-    if let Ok(st) = Command::new("xdg-open").arg(url).status() {
+    let url = &overlay_url(url);
+    // Omarchy already launches every other web app this way, so its wrapper
+    // gets first refusal: it knows which browser is default and starts it
+    // detached under the session's own scope.
+    if let Ok(st) = Command::new("omarchy-launch-webapp").arg(url).status()
+    {
         if st.success() {
             return;
         }
     }
-    log(&format!("xdg-open failed for {url} — showing the terminal report instead"));
+    for browser in ["brave", "chromium", "google-chrome-stable", "microsoft-edge", "vivaldi"] {
+        let ok = Command::new(browser).arg(format!("--app={url}")).spawn().is_ok();
+        if ok {
+            return;
+        }
+    }
+    if let Ok(st) = Command::new("xdg-open").arg(url).status() {
+        if st.success() {
+            log("no chromeless-capable browser found — opened an ordinary tab");
+            return;
+        }
+    }
+    log(&format!("cannot open {url} — showing the terminal report instead"));
     open_detail_window();
 }
 
@@ -333,6 +382,7 @@ struct Watcher {
     incidents: [Option<Incident>; 3],
     last_sample: Option<Instant>,
     last_prune: Instant,
+    tray: Option<tray::Tray>,
 }
 
 /// The UI's range buttons.  Snapping to one of these means the range the
@@ -480,6 +530,22 @@ impl Watcher {
                     _ => {}
                 }
             }
+        }
+
+        // The tray icon carries the same verdict the toasts do. Memory
+        // outranks IO outranks CPU: when two resources stall at once, the
+        // colour should name the one that hurts most.
+        if let Some(t) = self.tray.as_ref() {
+            let alarm = [Kind::Mem, Kind::Io, Kind::Cpu]
+                .into_iter()
+                .find(|k| self.incidents[k.idx()].is_some());
+            t.update(tray::State {
+                alarm,
+                detail: format!(
+                    "cpu {:.0}%  mem {:.0}%  io {:.0}%  load {:.1}",
+                    r.psi.cpu.avg60, r.psi.mem.avg60, r.psi.io.avg60, r.load1
+                ),
+            });
         }
         busy
     }
@@ -634,6 +700,18 @@ fn watch(cfg: Config) -> ! {
         log("--web needs a history database; ignoring");
     }
 
+    // The tray icon opens the same place a toast click does, so it shares the
+    // click handler; None when there is no session bus or no tray host.
+    let tray_url = cfg.web.as_deref().map(|addr| web::ui_url(addr, "cpu", 21600));
+    let tray = if cfg.tray {
+        tray::start(tray_url, |url| match url {
+            Some(u) => open_url(&u),
+            None => open_detail_window(),
+        })
+    } else {
+        None
+    };
+
     let mut w = Watcher {
         cfg,
         db,
@@ -641,6 +719,7 @@ fn watch(cfg: Config) -> ! {
         incidents: [None, None, None],
         last_sample: None,
         last_prune: Instant::now(),
+        tray,
     };
 
     let triggers: Vec<(Kind, std::fs::File)> = [
@@ -1133,5 +1212,67 @@ mod tests {
         assert_eq!(util::parse_span("7d"), Some(604_800));
         assert_eq!(util::parse_span("90"), Some(90));
         assert_eq!(util::parse_span("soon"), None);
+    }
+}
+
+#[cfg(test)]
+mod dbus_tests {
+    use crate::dbus::{Dec, Enc, Msg, METHOD_CALL};
+
+    /// A round-trip through the header encoder is the cheapest guard against
+    /// the alignment mistakes that make a bus drop the connection with no
+    /// diagnostic at all.
+    #[test]
+    fn header_round_trips() {
+        let mut b = Enc::new();
+        b.string("hello");
+        let m = Msg::call("org.kde.X", "/org/kde/X", "org.kde.I", "Do").with_body("s", b.buf);
+        let wire = super::dbus::encode_for_test(&m, 7);
+        let back = super::dbus::decode_for_test(&wire).expect("decodes");
+        assert_eq!(back.kind, METHOD_CALL);
+        assert_eq!(back.serial, 7);
+        assert_eq!(back.path.as_deref(), Some("/org/kde/X"));
+        assert_eq!(back.iface.as_deref(), Some("org.kde.I"));
+        assert_eq!(back.member.as_deref(), Some("Do"));
+        assert_eq!(back.sig.as_deref(), Some("s"));
+        assert_eq!(Dec::new(&back.body).string().as_deref(), Some("hello"));
+    }
+
+    /// Arrays carry a byte count, not an element count, and the count
+    /// excludes the padding between it and the first element.
+    #[test]
+    fn array_length_counts_bytes_after_padding() {
+        let mut e = Enc::new();
+        e.byte(0); // push the array off an 8-boundary
+        e.array(8, |e| {
+            e.strukt(|e| e.i32(1));
+            e.strukt(|e| e.i32(2));
+        });
+        // len u32 at offset 4 (aligned), first struct at 8, second at 16.
+        let len = u32::from_le_bytes(e.buf[4..8].try_into().unwrap()) as usize;
+        assert_eq!(len, 12, "two 8-aligned structs of one i32");
+        assert_eq!(e.buf.len(), 8 + len);
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::overlay_url;
+
+    #[test]
+    fn loopback_urls_get_the_alias() {
+        assert_eq!(
+            overlay_url("http://127.0.0.1:8787/#span=900"),
+            "http://busywatch.localhost:8787/#span=900"
+        );
+        assert_eq!(overlay_url("http://localhost:9000/"), "http://busywatch.localhost:9000/");
+    }
+
+    /// A UI bound to a real address must keep that address: rewriting it to a
+    /// loopback alias would open a window on the wrong machine's data.
+    #[test]
+    fn other_hosts_are_left_alone() {
+        assert_eq!(overlay_url("http://192.168.1.9:8787/"), "http://192.168.1.9:8787/");
+        assert_eq!(overlay_url("http://box.lan:8787/"), "http://box.lan:8787/");
     }
 }
