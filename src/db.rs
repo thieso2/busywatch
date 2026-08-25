@@ -491,6 +491,19 @@ pub struct Bucket {
     pub mem_total_kb: i64,
     pub swap_used_kb: i64,
     pub n: i64,
+    /// Power and clock. Optional throughout: a bucket covering rows written
+    /// before these columns existed, or a machine with no battery, has
+    /// nothing to say and must not draw as a zero.
+    pub ac_online: Option<f64>,
+    pub bat_pct: Option<f64>,
+    pub bat_power_uw: Option<f64>,
+    pub freq_khz: Option<f64>,
+    pub freq_max_khz: Option<f64>,
+    /// Throttle events *within* this bucket: the counters are cumulative, so
+    /// the bucket's span is max-min, and a reboot inside it reads negative
+    /// and is dropped rather than drawn as a spike.
+    pub throttled: Option<i64>,
+    pub throttled_ms: Option<i64>,
 }
 
 pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::Result<Vec<Bucket>> {
@@ -502,7 +515,11 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
                 AVG(COALESCE(io_avg60,0)),  MAX(COALESCE(io_avg60,0)),
                 AVG(COALESCE(load1,0)), MAX(COALESCE(load1,0)),
                 AVG(mem_total_kb), AVG(mem_avail_kb), MIN(mem_avail_kb),
-                MAX(COALESCE(swap_used_kb,0)), COUNT(*)
+                MAX(COALESCE(swap_used_kb,0)), COUNT(*),
+                AVG(ac_online), AVG(bat_pct), AVG(bat_power_uw),
+                AVG(cpu_freq_khz), AVG(cpu_freq_max_khz),
+                MAX(throttle_count) - MIN(throttle_count),
+                MAX(throttle_ms) - MIN(throttle_ms)
            FROM sample
           WHERE ts BETWEEN ?1 AND ?2
           GROUP BY b ORDER BY b",
@@ -530,6 +547,13 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
             mem_total_kb: total.unwrap_or(0.0) as i64,
             swap_used_kb: r.get::<_, i64>(12)?,
             n: r.get(13)?,
+            ac_online: r.get(14)?,
+            bat_pct: r.get(15)?,
+            bat_power_uw: r.get(16)?,
+            freq_khz: r.get(17)?,
+            freq_max_khz: r.get(18)?,
+            throttled: r.get::<_, Option<i64>>(19)?.filter(|v| *v >= 0),
+            throttled_ms: r.get::<_, Option<i64>>(20)?.filter(|v| *v >= 0),
         })
     })?;
     rows.collect()

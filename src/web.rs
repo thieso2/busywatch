@@ -185,7 +185,9 @@ impl Server {
                 out.push_str(&format!(
                     "{{\"t\":{},\"cpu\":{},\"cpuMax\":{},\"mem\":{},\"memMax\":{},\
                       \"io\":{},\"ioMax\":{},\"load\":{},\"loadMax\":{},\
-                      \"memUsed\":{},\"memUsedMax\":{},\"memTotal\":{},\"swap\":{},\"n\":{}}}",
+                      \"memUsed\":{},\"memUsedMax\":{},\"memTotal\":{},\"swap\":{},\"n\":{},\
+                      \"ac\":{},\"bat\":{},\"batW\":{},\"freq\":{},\"freqMax\":{},\
+                      \"thr\":{},\"thrMs\":{}}}",
                     b.t,
                     json_num(b.cpu_avg),
                     json_num(b.cpu_max),
@@ -199,7 +201,14 @@ impl Server {
                     json_num(b.mem_used_max_pct),
                     b.mem_total_kb,
                     b.swap_used_kb,
-                    b.n
+                    b.n,
+                    json_opt_num(b.ac_online),
+                    json_opt_num(b.bat_pct),
+                    json_opt_num(b.bat_power_uw),
+                    json_opt_num(b.freq_khz),
+                    json_opt_num(b.freq_max_khz),
+                    opt_i64(b.throttled),
+                    opt_i64(b.throttled_ms)
                 ));
             }
         }

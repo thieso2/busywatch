@@ -6,6 +6,7 @@
 :root{
   --bg:#f7f7f8; --panel:#fff; --ink:#16181d; --dim:#6b7280; --line:#e3e5ea;
   --cpu:#e0503a; --mem:#3f7fd6; --io:#c88a1d; --load:#7a5bd0; --swap:#b0563f;
+  --freq:#2f8f6f; --bat:#8a8f3a;
   --grid:#eceef2; --hl:rgba(0,0,0,.05);
   --c0:#3f7fd6; --c1:#e0503a; --c2:#2f9e6e; --c3:#c88a1d; --c4:#7a5bd0;
   --c5:#159ba0; --c6:#d0567f; --c7:#7c8a99;
@@ -13,6 +14,7 @@
 @media (prefers-color-scheme:dark){:root{
   --bg:#111317; --panel:#181b21; --ink:#e6e8ec; --dim:#98a0ad; --line:#272b33;
   --cpu:#ff7a5e; --mem:#63a8ff; --io:#e8b552; --load:#a48bff; --swap:#d97a5c;
+  --freq:#5fc79e; --bat:#c8cf5e;
   --grid:#20242b; --hl:rgba(255,255,255,.06);
   --c0:#63a8ff; --c1:#ff7a5e; --c2:#4cc38a; --c3:#e8b552; --c4:#a48bff;
   --c5:#3fc4c9; --c6:#ff86ab; --c7:#93a1b0;
@@ -221,6 +223,9 @@ function bytes(kb){ // input: KiB
 }
 const rate = b => bytes(b / 1024) + "/s";
 const pct = v => (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + "%";
+// kHz in, because that is what the kernel and the history both speak.
+const ghz = k => k >= 1e6 ? (k / 1e6).toFixed(1) + "GHz" : Math.round(k / 1000) + "MHz";
+const watts = uw => (Math.abs(uw) / 1e6).toFixed(1) + "W";
 function clock(t){
   const d = new Date(t * 1000);
   return pad(d.getHours()) + ":" + pad(d.getMinutes());
@@ -310,6 +315,14 @@ function chart(host, opts){
     if (x - PADL > 90)
       s += `<text class="norec-label" x="${((PADL+x)/2).toFixed(1)}" y="${(PADT+ih/2).toFixed(1)}" text-anchor="middle">no history before ${stamp(recordedFrom)}</text>`;
   }
+  // Bands are shaded like incidents but say something else: a throttled
+  // stretch is not a busywatch incident, it is the firmware holding the CPU
+  // back, and it needs to be visible on the clock chart in the same glance.
+  for (const b of (opts.bands || [])){
+    const a = Math.max(from, b.from), z = Math.min(to, b.to);
+    if (z < a) continue;
+    s += `<rect class="inc" x="${X(a).toFixed(1)}" y="${PADT}" width="${Math.max(1.5, X(z)-X(a)).toFixed(1)}" height="${ih}" fill="var(--cpu)"/>`;
+  }
   for (const inc of incidents){
     const a = Math.max(from, inc.started), b = Math.min(to, inc.ended == null ? to : inc.ended);
     if (b < a) continue;
@@ -330,6 +343,15 @@ function chart(host, opts){
     let cur = [];
     let prev = null;
     for (const r of rows){
+      // A missing value is not zero. Power and clock only exist in rows
+      // written since busywatch recorded them, so on an upgraded database
+      // they start partway through the range — drawing the absence as a flat
+      // line along the floor would claim the battery was at 0%.
+      if (r[d.key] == null){
+        if (cur.length) segs.push(cur);
+        cur = []; prev = null;
+        continue;
+      }
       if (prev !== null && r.t - prev > gap){ segs.push(cur); cur = []; }
       cur.push(r); prev = r.t;
     }
@@ -520,6 +542,24 @@ function renderGauges(l){
     ["load", l.load.toFixed(2), l.load / Math.max(1, l.cores) * 100, "--load"],
     ["swap", bytes(l.swapUsed), l.swapTotal ? l.swapUsed / l.swapTotal * 100 : 0, "--swap"],
   ];
+  // Power and clock only exist on some machines, and only in databases
+  // written by a version that records them. A desktop must not grow an empty
+  // battery tile, so each is added only when there is a reading behind it.
+  if (l.cpuFreqKhz != null){
+    const max = l.cpuFreqMaxKhz || l.cpuFreqKhz;
+    gs.push(["cpu clock", ghz(l.cpuFreqKhz), l.cpuFreqKhz / Math.max(1, max) * 100, "--freq"]);
+  }
+  if (l.batPct != null){
+    // The label carries what the number cannot: charging on mains reads very
+    // differently from the same percentage draining on an adapter that
+    // cannot keep up.
+    const on = l.acOnline === 1 ? "AC" : "battery";
+    const st = (l.batStatus || "").toLowerCase();
+    const arrow = st === "charging" ? "\u2191" : st === "discharging" ? "\u2193" : "";
+    const w = l.batPowerUw != null && l.batPowerUw !== 0
+      ? ` ${arrow}${Math.abs(l.batPowerUw / 1e6).toFixed(1)}W` : "";
+    gs.push([`battery · ${on}`, `${l.batPct.toFixed(0)}%${w}`, l.batPct, "--bat"]);
+  }
   $("#gauges").innerHTML = gs.map(([k, v, p, c]) =>
     `<div class="g"><i>${k}</i><b>${v}</b><div class="bar"><div style="width:${Math.min(100,p).toFixed(0)}%;background:var(${c})"></div></div></div>`).join("");
   $("#host").textContent = `· ${l.cores} cores · ${bytes(l.memTotal)} ram`;
@@ -534,8 +574,13 @@ function renderSystem(d){
     return;
   }
   const swapSeen = rows.some(r => r.swap > 0);
+  // Older rows carry no power or clock at all; draw the row only if this
+  // range actually has some, so an upgraded install does not get an empty
+  // chart for every range that predates the columns.
+  const clockSeen = rows.some(r => r.freq != null || r.bat != null);
   host.innerHTML = `<div id="c1"></div><div id="c2"></div><div id="c3"></div>`
-    + (swapSeen ? `<div id="c4"></div>` : "");
+    + (swapSeen ? `<div id="c4"></div>` : "")
+    + (clockSeen ? `<div id="c5"></div>` : "");
   const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents,
                   recordedFrom: d.span && d.span.first};
   chart($("#c1"), {...common, rows, h: 104, title: "cpu stall % · load",
@@ -555,6 +600,20 @@ function renderSystem(d){
   if (swapSeen)
     chart($("#c4"), {...common, rows, h: 84, title: "swap used",
       defs: [{key:"swap",color:"--swap",kind:"area"}], fmtL: bytes, floorL: 1024});
+  if (clockSeen){
+    // Throttle counters are cumulative, so a bucket's `thr` is how many
+    // events fell inside it: shade those buckets rather than plotting a
+    // count nobody can read off an axis.
+    const bands = [];
+    for (const r of rows) if (r.thr > 0) bands.push({from: r.t, to: r.t + d.bucket});
+    const maxFreq = Math.max(...rows.map(r => r.freqMax || 0), 0) || null;
+    chart($("#c5"), {...common, rows, bands, h: 92,
+      title: "cpu clock · battery % (right)" + (bands.length ? " · shaded = throttled" : ""),
+      maxL: maxFreq, maxR: 100,
+      defs: [{key:"freq",color:"--freq",kind:"area"},
+             {key:"bat",color:"--bat",axis:"r",width:1.2}],
+      fmtL: ghz, fmtR: v => v.toFixed(0) + "%"});
+  }
   const hover = t => {
     const r = nearest(rows, t);
     if (!r) return null;
@@ -566,9 +625,13 @@ function renderSystem(d){
       <tr><td>memory used</td><td>${pct(r.memUsed)} of ${bytes(r.memTotal)}</td></tr>
       <tr><td>swap</td><td>${bytes(r.swap)}</td></tr>
       <tr><td>load</td><td>${r.load.toFixed(2)} <span class="muted">peak ${r.loadMax.toFixed(2)}</span></td></tr>
+      ${r.freq == null ? "" : `<tr><td>cpu clock</td><td>${ghz(r.freq)}${r.freqMax ? ` <span class="muted">of ${ghz(r.freqMax)}</span>` : ""}</td></tr>`}
+      ${r.thr ? `<tr><td>throttled</td><td>${r.thr}\u00d7${r.thrMs ? ` · ${(r.thrMs/1000).toFixed(1)}s` : ""}</td></tr>` : ""}
+      ${r.bat == null ? "" : `<tr><td>battery</td><td>${r.bat.toFixed(0)}%${r.batW ? ` <span class="muted">${r.batW < 0 ? "\u2193" : "\u2191"}${watts(r.batW)}</span>` : ""}</td></tr>`}
+      ${r.ac == null ? "" : `<tr><td>power</td><td>${r.ac >= 0.5 ? "on AC" : "on battery"}${r.ac > 0 && r.ac < 1 ? ` <span class="muted">(changed in this bucket)</span>` : ""}</td></tr>`}
       </table>`};
   };
-  for (const id of ["#c1", "#c2", "#c3", "#c4"]) if ($(id)) wireHover($(id), hover);
+  for (const id of ["#c1", "#c2", "#c3", "#c4", "#c5"]) if ($(id)) wireHover($(id), hover);
   const inc = d.incidents.length;
   $("#sysSub").textContent = `${rows.length} points · ${dur(d.bucket)} each · `
     + `${stamp(d.from)} → ${stamp(d.to)}` + (inc ? ` · ${inc} incident${inc>1?"s":""}` : "");
