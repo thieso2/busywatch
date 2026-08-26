@@ -49,10 +49,19 @@ svg{display:block;width:100%;overflow:visible;touch-action:none}
 .crosshair{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 3;pointer-events:none}
 .inc{opacity:.13}
 .norec{fill:var(--dim);opacity:.05}
+/* A collapsed stretch of time, drawn as a seam in the timeline: a narrow
+   notch cut down to the page colour, a dashed rule down its middle, and how
+   long it was under the axis. */
+.brk{fill:var(--bg);stroke:var(--line);stroke-width:1;shape-rendering:crispEdges}
+.brkC{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 4;opacity:.5}
+.brkL{fill:var(--dim);font-size:9px;letter-spacing:.3px;opacity:.9}
 .norec-label{fill:var(--dim);font-size:10px}
 button[data-empty="true"]{opacity:.4}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11.5px;margin-top:4px}
 .legend span{display:inline-flex;align-items:center;gap:5px;cursor:default}
+/* Wraps to its own line when the legend runs out of room, rather than
+   breaking the sentence in half. */
+#breakNote{white-space:nowrap}
 .sw{width:9px;height:9px;border-radius:2px;display:inline-block}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:right;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -116,6 +125,7 @@ h3{font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;lett
       <span><i class="sw" style="background:var(--io)"></i>IO stall</span>
       <span><i class="sw" style="background:var(--load)"></i>load</span>
       <span class="muted">shaded band = recorded incident</span>
+      <span class="muted" id="breakNote"></span>
     </div>
   </section>
 
@@ -183,7 +193,7 @@ const PAL = ["--c0","--c1","--c2","--c3","--c4","--c5","--c6","--c7"];
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 let state = {span: 3600, metric: "mem", paused: false, data: null, sel: null,
-             sort: null, sortDir: -1, filter: ""};
+             sort: null, sortDir: -1, filter: "", axis: null, detail: null};
 // Command names come from /proc and can contain anything.
 const esc = s => String(s).replace(/[&<>"]/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -251,18 +261,43 @@ function ago(t){
 // Every chart is plain SVG built from strings: no libraries, no network.
 const PADL = 46, PADR = 42, PADT = 8, PADB = 16;
 
-function xTicks(from, to){
-  const span = to - from, out = [];
-  const steps = [60,300,900,1800,3600,7200,21600,43200,86400,172800,604800];
-  let step = steps.find(s => span / s <= 8) || 604800 * 4;
+// Finer in the middle than the spacing this replaced: when a break takes a
+// label away, having a 3h step to fall back on beats jumping from 2h to 6h
+// and leaving three labels on a day.
+const TICK_STEPS = [60,300,600,900,1800,3600,7200,10800,14400,21600,43200,
+                    86400,172800,604800,2419200];
+
+function tickRun(A, step){
+  const out = [];
   const tz = new Date().getTimezoneOffset() * 60;
-  let t = Math.ceil((from - tz) / step) * step + tz;
-  for (; t <= to; t += step){
+  let last = -Infinity;
+  for (let t = Math.ceil((A.from - tz) / step) * step + tz; t <= A.to; t += step){
+    // A label for a time nothing was recorded at points at a break, not at a
+    // place on the chart.
+    if (A.inBreak(t)) continue;
+    // Two ticks either side of a break are a few pixels apart on the page
+    // even when they are hours apart in truth: keep the first, drop the one
+    // that would sit on top of it.
+    const u = A.u(t);
+    if (u - last < A.U * .045) continue;
+    last = u;
     // Over several days the same "12:00" on every axis is useless — date the
     // midnight ticks so a day can be told from its neighbour.
     const d = new Date(t * 1000);
     const midnight = d.getHours() === 0 && d.getMinutes() === 0;
     out.push([t, step >= 86400 || midnight ? `${d.getMonth()+1}/${d.getDate()}` : clock(t)]);
+  }
+  return out;
+}
+
+// The finest spacing that still fits: counted after the collapsed stretches
+// have had their labels taken away, so an axis that skips every night does
+// not end up with two lonely dates on it.
+function xTicks(A){
+  let out = [];
+  for (const step of TICK_STEPS){
+    out = tickRun(A, step);
+    if (out.length <= 8) return out;
   }
   return out;
 }
@@ -285,13 +320,100 @@ function niceMax(v, floor){
   return 10 * mag;
 }
 
+// ------------------------------------------------------------------ timeline
+// Time is not always drawn to scale. A machine that was asleep, off, or not
+// running busywatch leaves an hours-wide hole in every chart, and over a week
+// those holes can be most of the width — so a long one collapses to a narrow
+// marked break and the recorded time gets the pixels instead. Every chart on
+// the page shares one axis object: they live in different sections but move
+// one crosshair between them, so they have to agree on where a moment is.
+const BRK_W = .009;   // one break, as a share of the time actually recorded
+const BRK_CAP = .18;  // ...but all of them together never take more than this
+
+function makeAxis(from, to, times, bucket, recordedFrom){
+  const span = Math.max(1, to - from);
+  const step = bucket || 60;
+  // A hole has to be wider than the break that replaces it, or "collapsing"
+  // it would only make it bigger.
+  const floor = Math.max(step * 2.5, span * BRK_W * 2);
+  const holes = [];
+  let prev = null;
+  for (const t of times || []){
+    if (prev != null){
+      // The sample before a hole still covers its own bucket, so the missing
+      // time starts where that bucket ends — and it is the missing time, not
+      // the distance between the two samples, that has to clear the floor.
+      const start = Math.min(prev + step, t);
+      if (t - start > floor) holes.push([start, t]);
+    }
+    prev = t;
+  }
+  // A window that opens on a machine which was already off starts with a hole
+  // too — but only back as far as the first sample ever, because everything
+  // before that is "no history", which says something else and has its own
+  // label.
+  if (times && times.length){
+    const start = Math.max(from, recordedFrom || from);
+    if (times[0] - start > floor) holes.unshift([start, times[0]]);
+  }
+  const dead = holes.reduce((a, [x, y]) => a + (y - x), 0);
+  const live = Math.max(1, span - dead);
+  const bw = live * (holes.length ? Math.min(BRK_W, BRK_CAP / holes.length) : BRK_W);
+  const breaks = [];
+  let u = 0, cur = from;
+  for (const [x, y] of holes){
+    u += x - cur;
+    breaks.push({from: x, to: y, u0: u, u1: u + bw});
+    u += bw;
+    cur = y;
+  }
+  const U = Math.max(1, u + (to - cur));
+  // u() is time in drawn units; at() is the way back, and says so when the
+  // point asked about is one of the collapsed stretches.
+  const A = {from, to, U, live, breaks};
+  A.u = t => {
+    if (t <= from) return 0;
+    if (t >= to) return U;
+    let acc = 0, c = from;
+    for (const b of breaks){
+      if (t < b.from) return acc + (t - c);
+      acc += b.from - c;
+      if (t <= b.to) return acc + (t - b.from) / Math.max(1, b.to - b.from) * bw;
+      acc += bw;
+      c = b.to;
+    }
+    return acc + (t - c);
+  };
+  A.at = uu => {
+    uu = Math.min(U, Math.max(0, uu));
+    let acc = 0, c = from;
+    for (const b of breaks){
+      const run = b.from - c;
+      if (uu <= acc + run) return {t: c + (uu - acc)};
+      acc += run;
+      if (uu <= acc + bw) return {t: b.from, brk: b};
+      acc += bw;
+      c = b.to;
+    }
+    return {t: Math.min(to, c + (uu - acc))};
+  };
+  A.inBreak = t => breaks.some(b => t > b.from && t < b.to);
+  A.dead = dead;
+  return A;
+}
+
 // defs: {key, color, kind:"area"|"line", axis:"l"|"r", width}
 function chart(host, opts){
-  const {rows, defs, from, to, h = 96, fmtL = pct, fmtR = null,
+  const {rows, defs, h = 96, fmtL = pct, fmtR = null,
          maxL = null, maxR = null, incidents = [], title = "", recordedFrom = null} = opts;
+  // A chart drawn on its own — a test, or one built before the page had data
+  // — gets a plain axis over its own window.
+  const A = opts.axis || makeAxis(opts.from, opts.to, null, opts.bucket);
+  const from = A.from, to = A.to;
   const w = host.clientWidth || 900;
   const iw = w - PADL - PADR, ih = h - PADT - PADB;
-  const X = t => PADL + (t - from) / Math.max(1, to - from) * iw;
+  const XU = u => PADL + u / A.U * iw;
+  const X = t => XU(A.u(t));
   let ml = maxL, mr = maxR;
   if (ml == null){
     ml = 0;
@@ -335,7 +457,7 @@ function chart(host, opts){
     s += `<text class="axis" x="${PADL-6}" y="${(y+3).toFixed(1)}" text-anchor="end">${fmtL(ml*i/2)}</text>`;
     if (fmtR) s += `<text class="axis" x="${w-PADR+6}" y="${(y+3).toFixed(1)}">${fmtR(mr*i/2)}</text>`;
   }
-  for (const [t, lab] of xTicks(from, to))
+  for (const [t, lab] of xTicks(A))
     s += `<text class="axis" x="${X(t).toFixed(1)}" y="${h-4}" text-anchor="middle">${lab}</text>`;
 
   for (const d of defs){
@@ -367,18 +489,51 @@ function chart(host, opts){
       s += `<polyline points="${pts.join(" ")}" fill="none" stroke="var(${d.color})" stroke-width="${d.width || 1.4}" stroke-linejoin="round" stroke-linecap="round"${d.dash ? ` stroke-dasharray="${d.dash}"` : ""}/>`;
     }
   }
+  s += breakMarks(A, XU, ih);
   s += `<line class="crosshair" id="ch" x1="0" x2="0" y1="${PADT}" y2="${PADT+ih}" style="display:none"/>`;
   if (title) s += `<text class="axis" x="${PADL}" y="${PADT+9}" style="font-size:10.5px;fill:var(--dim)">${title}</text>`;
   s += `</svg>`;
   host.innerHTML = s;
-  host._X = X; host._from = from; host._to = to;
+  host._X = X; host._XU = XU; host._axis = A;
   return host;
 }
 
-function stackChart(host, series, from, to, bucket, fmt, recordedFrom){
+// "8h", "22m", "2d" — a break is a dozen pixels wide, and the exact figure is
+// a hover away.
+const briefDur = s => s >= 86400 ? Math.round(s / 86400) + "d"
+                    : s >= 3600 ? Math.round(s / 3600) + "h"
+                    : Math.max(1, Math.round(s / 60)) + "m";
+
+// Drawn last, over everything: a notch in the page colour, so an incident that
+// was still open when the machine went away cannot appear to run straight
+// through the missing hours. Squared off and narrow — a seam in the timeline,
+// not a slab across it — with how long it lasted set down the seam itself.
+// Along the bottom axis that figure would read as one more clock time.
+function breakMarks(A, XU, ih){
+  let s = "";
+  for (const b of A.breaks){
+    const x0 = XU(b.u0), x1 = XU(b.u1);
+    const xm = (x0 + x1) / 2, ym = PADT + ih / 2, w = Math.max(2, x1 - x0);
+    s += `<rect class="brk" x="${x0.toFixed(1)}" y="${PADT}" `
+       + `width="${w.toFixed(1)}" height="${ih.toFixed(1)}"/>`;
+    s += w >= 9 && ih >= 44
+      ? `<text class="brkL" x="${xm.toFixed(1)}" y="${ym.toFixed(1)}" text-anchor="middle"`
+        + ` dominant-baseline="central"`
+        + ` transform="rotate(-90 ${xm.toFixed(1)} ${ym.toFixed(1)})">`
+        + `${briefDur(b.to - b.from)}</text>`
+      // Too narrow to letter — a dotted rule still says the axis is cut here.
+      : `<line class="brkC" x1="${xm.toFixed(1)}" x2="${xm.toFixed(1)}" `
+        + `y1="${PADT}" y2="${(PADT + ih).toFixed(1)}"/>`;
+  }
+  return s;
+}
+
+function stackChart(host, series, from, to, bucket, fmt, recordedFrom, axis){
+  const A = axis || makeAxis(from, to, null, bucket);
   const w = host.clientWidth || 900, h = 190;
   const iw = w - PADL - PADR, ih = h - PADT - PADB;
-  const X = t => PADL + (t - from) / Math.max(1, to - from) * iw;
+  const XU = u => PADL + u / A.U * iw;
+  const X = t => XU(A.u(t));
   const ts = new Set();
   for (const s of series) for (const [t] of s.points) ts.add(t);
   const times = [...ts].sort((a, b) => a - b);
@@ -397,7 +552,7 @@ function stackChart(host, series, from, to, bucket, fmt, recordedFrom){
     const x = Math.min(X(recordedFrom), w - PADR);
     s += `<rect class="norec" x="${PADL}" y="${PADT}" width="${Math.max(0, x-PADL).toFixed(1)}" height="${ih}"/>`;
   }
-  for (const [t, lab] of xTicks(from, to))
+  for (const [t, lab] of xTicks(A))
     s += `<text class="axis" x="${X(t).toFixed(1)}" y="${h-4}" text-anchor="middle">${lab}</text>`;
   // Bottom-up cumulative bands, split wherever the history has a hole.
   const base = new Map(times.map(t => [t, 0]));
@@ -419,9 +574,10 @@ function stackChart(host, series, from, to, bucket, fmt, recordedFrom){
     flush();
     for (const t of times) base.set(t, base.get(t) + (m.get(t) || 0));
   });
+  s += breakMarks(A, XU, ih);
   s += `<line class="crosshair" id="ch" x1="0" x2="0" y1="${PADT}" y2="${PADT+ih}" style="display:none"/></svg>`;
   host.innerHTML = s;
-  host._X = X; host._from = from; host._to = to;
+  host._X = X; host._XU = XU; host._axis = A;
   host._stack = {times, maps, series};
 }
 
@@ -445,25 +601,42 @@ function nearest(rows, t){
   return best;
 }
 
+// What a collapsed stretch hid. Hovering one has to answer that, rather than
+// snap to whichever sample happens to sit on its edge.
+const brkTip = b => `<b>time skipped \u00b7 ${dur(b.to - b.from)}</b><table>
+  <tr><td>from</td><td>${stamp(b.from)}</td></tr>
+  <tr><td>to</td><td>${stamp(b.to)}</td></tr>
+  <tr><td colspan="2" class="muted">no samples \u2014 asleep, off, or busywatch
+    not running</td></tr></table>`;
+
 function wireHover(host, rowsAt){
   const move = ev => {
     const svg = host.querySelector("svg");
     if (!svg) return;
+    const A = host._axis;
+    if (!A) return;
     const box = svg.getBoundingClientRect();
     const w = svg.viewBox.baseVal.width;
     const px = (ev.clientX - box.left) / box.width * w;
-    const t = host._from + (px - PADL) / (w - PADL - PADR) * (host._to - host._from);
-    const hit = rowsAt(t, ev);
+    const at = A.at((px - PADL) / Math.max(1, w - PADL - PADR) * A.U);
+    const hit = at.brk
+      ? {u: (at.brk.u0 + at.brk.u1) / 2, html: brkTip(at.brk)}
+      : rowsAt(at.t, ev);
     if (!hit){ hideTip(); return; }
     // Move every visible crosshair, so the three stacked charts read as one.
     document.querySelectorAll("#ch").forEach(c => {
       const p = c.ownerSVGElement.parentElement;
       if (!p._X) return;
-      const x = p._X(hit.t);
+      const x = hit.u != null ? p._XU(hit.u) : p._X(hit.t);
       c.setAttribute("x1", x); c.setAttribute("x2", x); c.style.display = "";
     });
     showTip(ev, hit.html);
   };
+  // The stacked chart and the drilldown live in elements that outlive their
+  // contents, and every poll rewires them — without this they would collect a
+  // new listener every fifteen seconds.
+  if (host._move) host.removeEventListener("pointermove", host._move);
+  host._move = move;
   host.addEventListener("pointermove", move);
   host.addEventListener("pointerleave", hideTip);
 }
@@ -506,11 +679,16 @@ const pointsFor = () => Math.min(1200, Math.max(60, Math.round((innerWidth || 90
 function render(){
   const d = state.data;
   if (!d) return;
+  // Built once, from the system series — the record of when busywatch was
+  // actually awake — and handed to every chart on the page so they all skip
+  // the same stretches and the crosshair still means one moment.
+  state.axis = makeAxis(d.from, d.to, (d.series || []).map(r => r.t), d.bucket,
+                        d.span && d.span.first);
   // Independently, so a failure in one panel cannot leave the charts frozen
   // on the previous range with no sign of why.
   for (const [name, fn] of [["coverage", renderCoverage], ["gauges", () => renderGauges(d.live)],
                             ["charts", renderSystem], ["apps", renderHogs],
-                            ["incidents", renderIncidents]]){
+                            ["incidents", renderIncidents], ["drilldown", renderDetailCharts]]){
     try { fn(d); }
     catch (e){ console.error("busywatch: rendering " + name + " failed", e); }
   }
@@ -568,6 +746,15 @@ function renderGauges(l){
 function renderSystem(d){
   const rows = d.series;
   const host = $("#charts");
+  // The collapsed stretches need saying out loud, not just drawing: an axis
+  // that is not to scale is worse than a gap if nobody notices.
+  const brk = (state.axis && state.axis.breaks) || [];
+  $("#breakNote").innerHTML = brk.length
+    ? `<svg width="11" height="10" viewBox="0 0 11 10"><path d="M2,9 L5,1 M6,9 L9,1"
+         stroke="var(--dim)" stroke-width="1.3" fill="none"/></svg>`
+      + `${brk.length} gap${brk.length > 1 ? "s" : ""} collapsed \u00b7 `
+      + `${dur(state.axis.dead)} asleep, off or not recording`
+    : "";
   if (!rows.length){
     host.innerHTML = `<p class="muted">No samples in this range yet. busywatch records a sample every minute once the watcher runs.</p>`;
     $("#sysSub").textContent = "";
@@ -592,7 +779,7 @@ function renderSystem(d){
     + (clockSeen ? `<div id="c5"></div>` : "")
     + (wattsSeen ? `<div id="c6"></div>` : "");
   const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents,
-                  recordedFrom: d.span && d.span.first};
+                  recordedFrom: d.span && d.span.first, axis: state.axis};
   chart($("#c1"), {...common, rows, h: 104, title: "cpu stall % · load",
     defs: [{key:"cpuMax",color:"--cpu",kind:"area",opacity:.13,width:.8,dash:"2 2"},
            {key:"cpu",color:"--cpu",kind:"area"},
@@ -664,7 +851,8 @@ function renderHogs(d){
   const stack = d.stack.filter(s => s.points.length);
   state.stackComms = new Set(stack.map(s => s.comm));
   if (stack.length)
-    stackChart($("#stack"), stack, d.from, d.to, d.bucket, fmt, d.span && d.span.first);
+    stackChart($("#stack"), stack, d.from, d.to, d.bucket, fmt, d.span && d.span.first,
+               state.axis);
   else $("#stack").innerHTML = `<p class="muted">No per-process history in this range.</p>`;
   $("#stackLegend").innerHTML = stack.map((s, i) =>
     `<span data-comm="${esc(s.comm)}"><i class="sw" style="background:var(${PAL[i%PAL.length]})"></i>${s.comm}</span>`).join("");
@@ -774,23 +962,7 @@ async function openDetail(comm){
   $("#dTiles").innerHTML = tiles.map(([k, v, sub]) =>
     `<div class="tile"><i>${k}</i><b>${v}</b><small>${sub || "&nbsp;"}</small></div>`).join("");
 
-  const toRows = pts => pts.map(([t, v]) => ({t, v}));
-  const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: inc, h: 112};
-  chart($("#dMem"), {...common, rows: toRows(d.mem), title: "rss",
-    defs: [{key:"v",color:"--mem",kind:"area"}], fmtL: bytes, floorL: 1024});
-  chart($("#dCpu"), {...common, rows: toRows(d.cpu), title: "cpu %",
-    defs: [{key:"v",color:"--cpu",kind:"area"}], fmtL: pct});
-  chart($("#dIo"), {...common, rows: toRows(d.io), h: 96, title: "io read+write per second",
-    defs: [{key:"v",color:"--io",kind:"area"}], fmtL: v => rate(v), floorL: 65536});
-  for (const [id, fmt, label] of [["#dMem", bytes, "rss"], ["#dCpu", pct, "cpu"],
-                                  ["#dIo", rate, "io"]]){
-    const rows = toRows(id === "#dMem" ? d.mem : id === "#dCpu" ? d.cpu : d.io);
-    wireHover($(id), t => {
-      const r = nearest(rows, t);
-      return r && {t: r.t, html: `<b>${stamp(r.t)}</b><table>
-        <tr><td>${comm} ${label}</td><td>${fmt(r.v)}</td></tr></table>`};
-    });
-  }
+  state.detail = {comm, d};
 
   $("#dPids").innerHTML = `<h3>pids</h3><div class="tw"><table>
     <thead><tr><th>pid</th><th>rss peak</th><th>cpu peak</th><th>io peak</th>
@@ -816,6 +988,33 @@ async function openDetail(comm){
 
   render();
   $("#detail").scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+// Redrawn from the stored payload on every render, not only when the
+// drilldown is opened: these three sit on the page's shared axis, and that
+// changes whenever the range does or a new gap is collapsed.
+function renderDetailCharts(){
+  const dd = state.detail;
+  if (!dd || !$("#detail").classList.contains("open")) return;
+  const {comm, d} = dd;
+  const toRows = pts => pts.map(([t, v]) => ({t, v}));
+  const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents || [],
+                  h: 112, axis: state.axis};
+  chart($("#dMem"), {...common, rows: toRows(d.mem), title: "rss",
+    defs: [{key:"v",color:"--mem",kind:"area"}], fmtL: bytes, floorL: 1024});
+  chart($("#dCpu"), {...common, rows: toRows(d.cpu), title: "cpu %",
+    defs: [{key:"v",color:"--cpu",kind:"area"}], fmtL: pct});
+  chart($("#dIo"), {...common, rows: toRows(d.io), h: 96, title: "io read+write per second",
+    defs: [{key:"v",color:"--io",kind:"area"}], fmtL: v => rate(v), floorL: 65536});
+  for (const [id, fmt, label] of [["#dMem", bytes, "rss"], ["#dCpu", pct, "cpu"],
+                                  ["#dIo", rate, "io"]]){
+    const rows = toRows(id === "#dMem" ? d.mem : id === "#dCpu" ? d.cpu : d.io);
+    wireHover($(id), t => {
+      const r = nearest(rows, t);
+      return r && {t: r.t, html: `<b>${stamp(r.t)}</b><table>
+        <tr><td>${comm} ${label}</td><td>${fmt(r.v)}</td></tr></table>`};
+    });
+  }
 }
 
 // --------------------------------------------------------------------- wiring
@@ -865,7 +1064,9 @@ $("#stackLegend").onclick = e => {
   if (s) openDetail(s.dataset.comm);
 };
 $("#closeDetail").onclick = () => {
-  $("#detail").classList.remove("open"); state.sel = null; writeHash(true); render();
+  $("#detail").classList.remove("open");
+  state.sel = null; state.detail = null;
+  writeHash(true); render();
 };
 addEventListener("resize", () => { clearTimeout(window._rz);
   window._rz = setTimeout(render, 150); });

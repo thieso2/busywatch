@@ -160,6 +160,16 @@ throttled stretches shaded, and the **watts** flowing through the battery —
 draw and charge drawn apart, so a laptop that suddenly runs the fan and the
 battery down at once shows both in one glance.
 
+Time is not drawn to scale where nothing was recorded. A stretch with no
+samples — asleep, powered off, or busywatch not running — **collapses to a
+narrow seam** so the hours that were recorded get the width instead. Where the
+chart is wide enough the seam is lettered with how long it swallowed ("8h"),
+the legend says how many were collapsed and how long they were altogether, and
+hovering one names the exact stretch. Only holes wider than the break that replaces
+them are collapsed, so a brief suspend still reads as a gap in the line, and
+every chart on the page shares the one axis — the crosshair still means a
+single moment across all of them.
+
 Below it is the **rundown**: every application seen in the range, filterable
 and sortable on any column — rss now / peak / average, cpu time, cpu peak and
 average, bytes read and written, how many pids, when it was last seen.
