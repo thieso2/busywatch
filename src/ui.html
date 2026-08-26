@@ -6,7 +6,7 @@
 :root{
   --bg:#f7f7f8; --panel:#fff; --ink:#16181d; --dim:#6b7280; --line:#e3e5ea;
   --cpu:#e0503a; --mem:#3f7fd6; --io:#c88a1d; --load:#7a5bd0; --swap:#b0563f;
-  --freq:#2f8f6f; --bat:#8a8f3a;
+  --freq:#2f8f6f; --bat:#8a8f3a; --draw:#b5502a; --chg:#2f9e6e;
   --grid:#eceef2; --hl:rgba(0,0,0,.05);
   --c0:#3f7fd6; --c1:#e0503a; --c2:#2f9e6e; --c3:#c88a1d; --c4:#7a5bd0;
   --c5:#159ba0; --c6:#d0567f; --c7:#7c8a99;
@@ -14,7 +14,7 @@
 @media (prefers-color-scheme:dark){:root{
   --bg:#111317; --panel:#181b21; --ink:#e6e8ec; --dim:#98a0ad; --line:#272b33;
   --cpu:#ff7a5e; --mem:#63a8ff; --io:#e8b552; --load:#a48bff; --swap:#d97a5c;
-  --freq:#5fc79e; --bat:#c8cf5e;
+  --freq:#5fc79e; --bat:#c8cf5e; --draw:#ff9457; --chg:#4cc38a;
   --grid:#20242b; --hl:rgba(255,255,255,.06);
   --c0:#63a8ff; --c1:#ff7a5e; --c2:#4cc38a; --c3:#e8b552; --c4:#a48bff;
   --c5:#3fc4c9; --c6:#ff86ab; --c7:#93a1b0;
@@ -578,9 +578,19 @@ function renderSystem(d){
   // range actually has some, so an upgraded install does not get an empty
   // chart for every range that predates the columns.
   const clockSeen = rows.some(r => r.freq != null || r.bat != null);
+  // Watts are recorded signed — negative while the battery drains, positive
+  // while it fills. Splitting the sign into two positive series lets one
+  // watt axis carry both directions, and keeps a stretch spent charging from
+  // drawing a discharge line flat along zero.
+  for (const r of rows){
+    r.wOut = r.batW < 0 ? -r.batW / 1e6 : null;
+    r.wIn  = r.batW > 0 ?  r.batW / 1e6 : null;
+  }
+  const wattsSeen = rows.some(r => r.wOut != null || r.wIn != null);
   host.innerHTML = `<div id="c1"></div><div id="c2"></div><div id="c3"></div>`
     + (swapSeen ? `<div id="c4"></div>` : "")
-    + (clockSeen ? `<div id="c5"></div>` : "");
+    + (clockSeen ? `<div id="c5"></div>` : "")
+    + (wattsSeen ? `<div id="c6"></div>` : "");
   const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents,
                   recordedFrom: d.span && d.span.first};
   chart($("#c1"), {...common, rows, h: 104, title: "cpu stall % · load",
@@ -614,6 +624,15 @@ function renderSystem(d){
              {key:"bat",color:"--bat",axis:"r",width:1.2}],
       fmtL: ghz, fmtR: v => v.toFixed(0) + "%"});
   }
+  if (wattsSeen)
+    chart($("#c6"), {...common, rows, h: 92,
+      // The title doubles as the legend: two bands, coloured in place, so
+      // nobody has to guess which way round they are.
+      title: 'battery power \u00b7 <tspan fill="var(--draw)">\u2193 draw</tspan>'
+           + ' \u00b7 <tspan fill="var(--chg)">\u2191 charge</tspan>',
+      defs: [{key:"wOut",color:"--draw",kind:"area"},
+             {key:"wIn",color:"--chg",kind:"area"}],
+      fmtL: w => w.toFixed(w < 10 ? 1 : 0) + "W", floorL: 5});
   const hover = t => {
     const r = nearest(rows, t);
     if (!r) return null;
@@ -631,7 +650,7 @@ function renderSystem(d){
       ${r.ac == null ? "" : `<tr><td>power</td><td>${r.ac >= 0.5 ? "on AC" : "on battery"}${r.ac > 0 && r.ac < 1 ? ` <span class="muted">(changed in this bucket)</span>` : ""}</td></tr>`}
       </table>`};
   };
-  for (const id of ["#c1", "#c2", "#c3", "#c4", "#c5"]) if ($(id)) wireHover($(id), hover);
+  for (const id of ["#c1", "#c2", "#c3", "#c4", "#c5", "#c6"]) if ($(id)) wireHover($(id), hover);
   const inc = d.incidents.length;
   $("#sysSub").textContent = `${rows.length} points · ${dur(d.bucket)} each · `
     + `${stamp(d.from)} → ${stamp(d.to)}` + (inc ? ` · ${inc} incident${inc>1?"s":""}` : "");

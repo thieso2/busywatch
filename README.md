@@ -154,7 +154,11 @@ busywatch --web                  # or serve from the watcher itself
 
 The page charts cpu / memory / io stall, load, memory used and swap over
 **15 m to 30 d**, with recorded incidents shaded on the timeline, and a
-**stacked chart of the top apps over time** (memory, CPU or IO).
+**stacked chart of the top apps over time** (memory, CPU or IO). On a machine
+that reports them there are two more: **cpu clock and battery percent**, with
+throttled stretches shaded, and the **watts** flowing through the battery —
+draw and charge drawn apart, so a laptop that suddenly runs the fan and the
+battery down at once shows both in one glance.
 
 Below it is the **rundown**: every application seen in the range, filterable
 and sortable on any column — rss now / peak / average, cpu time, cpu peak and
