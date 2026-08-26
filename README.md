@@ -155,10 +155,13 @@ busywatch --web                  # or serve from the watcher itself
 The page charts cpu / memory / io stall, load, memory used and swap over
 **15 m to 30 d**, with recorded incidents shaded on the timeline, and a
 **stacked chart of the top apps over time** (memory, CPU or IO). On a machine
-that reports them there are two more: **cpu clock and battery percent**, with
-throttled stretches shaded, and the **watts** flowing through the battery —
-draw and charge drawn apart, so a laptop that suddenly runs the fan and the
-battery down at once shows both in one glance.
+that reports them there are three more: **cpu clock and battery percent**, with
+throttled stretches shaded; **cpu temperature and fan speed**, drawn directly
+under the clock because they are what those throttled stretches are made of;
+and the **watts** flowing through the battery — draw and charge drawn apart,
+so a laptop that suddenly runs the fan and the battery down at once shows both
+in one glance. The temperature axis is fixed at 100 °C rather than scaled to
+the range, so the height of the line means the same thing every time you look.
 
 Time is not drawn to scale where nothing was recorded. A stretch with no
 samples — asleep, powered off, or busywatch not running — **collapses to a

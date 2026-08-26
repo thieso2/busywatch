@@ -442,6 +442,7 @@ impl Watcher {
             load1: load1(),
             power: sample::read_power(),
             clock: sample::read_cpu_clock(),
+            thermal: sample::read_thermal(),
         };
 
         // Closing comes first: an incident that just ended must not hold the
@@ -1066,6 +1067,9 @@ fn cmd_detail(db_path: &Path) -> i32 {
     }
     if let Some(l) = sample::read_cpu_clock().summary() {
         println!("cpu   {l}");
+    }
+    if let Some(l) = sample::read_thermal().summary() {
+        println!("heat  {l}");
     }
 
     print!("\nsampling processes for 1s…");

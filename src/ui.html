@@ -7,6 +7,7 @@
   --bg:#f7f7f8; --panel:#fff; --ink:#16181d; --dim:#6b7280; --line:#e3e5ea;
   --cpu:#e0503a; --mem:#3f7fd6; --io:#c88a1d; --load:#7a5bd0; --swap:#b0563f;
   --freq:#2f8f6f; --bat:#8a8f3a; --draw:#b5502a; --chg:#2f9e6e;
+  --temp:#b83b5e; --fan:#1f7a8c;
   --grid:#eceef2; --hl:rgba(0,0,0,.05);
   --c0:#3f7fd6; --c1:#e0503a; --c2:#2f9e6e; --c3:#c88a1d; --c4:#7a5bd0;
   --c5:#159ba0; --c6:#d0567f; --c7:#7c8a99;
@@ -15,6 +16,7 @@
   --bg:#111317; --panel:#181b21; --ink:#e6e8ec; --dim:#98a0ad; --line:#272b33;
   --cpu:#ff7a5e; --mem:#63a8ff; --io:#e8b552; --load:#a48bff; --swap:#d97a5c;
   --freq:#5fc79e; --bat:#c8cf5e; --draw:#ff9457; --chg:#4cc38a;
+  --temp:#ff8fab; --fan:#4fc3d9;
   --grid:#20242b; --hl:rgba(255,255,255,.06);
   --c0:#63a8ff; --c1:#ff7a5e; --c2:#4cc38a; --c3:#e8b552; --c4:#a48bff;
   --c5:#3fc4c9; --c6:#ff86ab; --c7:#93a1b0;
@@ -236,6 +238,10 @@ const pct = v => (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + "%";
 // kHz in, because that is what the kernel and the history both speak.
 const ghz = k => k >= 1e6 ? (k / 1e6).toFixed(1) + "GHz" : Math.round(k / 1000) + "MHz";
 const watts = uw => (Math.abs(uw) / 1e6).toFixed(1) + "W";
+// Millidegrees in, because that is what hwmon and the history both speak.
+const degC = mc => (mc / 1000).toFixed(0) + "\u00b0C";
+// Fan speeds run to four figures; "5.4k" beats "5400" on a cramped axis.
+const krpm = v => v >= 1000 ? (v / 1000).toFixed(1) + "k" : v.toFixed(0);
 function clock(t){
   const d = new Date(t * 1000);
   return pad(d.getHours()) + ":" + pad(d.getMinutes());
@@ -727,6 +733,13 @@ function renderGauges(l){
     const max = l.cpuFreqMaxKhz || l.cpuFreqKhz;
     gs.push(["cpu clock", ghz(l.cpuFreqKhz), l.cpuFreqKhz / Math.max(1, max) * 100, "--freq"]);
   }
+  // How hot it is, and how hard the fan is working to keep it there. A
+  // desktop with no tachometer and a VM with no die sensor get neither.
+  if (l.cpuTempMc != null)
+    gs.push(["cpu temp", degC(l.cpuTempMc), l.cpuTempMc / 1000, "--temp"]);
+  if (l.fanRpm != null)
+    gs.push(["fan", l.fanRpm ? `${Math.round(l.fanRpm)} rpm` : "off",
+             l.fanMaxRpm ? l.fanRpm / l.fanMaxRpm * 100 : 0, "--fan"]);
   if (l.batPct != null){
     // The label carries what the number cannot: charging on mains reads very
     // differently from the same percentage draining on an adapter that
@@ -774,9 +787,18 @@ function renderSystem(d){
     r.wIn  = r.batW > 0 ?  r.batW / 1e6 : null;
   }
   const wattsSeen = rows.some(r => r.wOut != null || r.wIn != null);
+  // Degrees, not millidegrees, so the axis reads straight off the row.
+  for (const r of rows){
+    r.tempC = r.temp == null ? null : r.temp / 1000;
+    r.tempMaxC = r.tempMax == null ? null : r.tempMax / 1000;
+  }
+  const heatSeen = rows.some(r => r.temp != null || r.fan != null);
+  // Heat sits under the clock rather than at the end: the throttled stretches
+  // shaded on that chart are explained by the line directly below them.
   host.innerHTML = `<div id="c1"></div><div id="c2"></div><div id="c3"></div>`
     + (swapSeen ? `<div id="c4"></div>` : "")
     + (clockSeen ? `<div id="c5"></div>` : "")
+    + (heatSeen ? `<div id="c7"></div>` : "")
     + (wattsSeen ? `<div id="c6"></div>` : "");
   const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents,
                   recordedFrom: d.span && d.span.first, axis: state.axis};
@@ -811,6 +833,17 @@ function renderSystem(d){
              {key:"bat",color:"--bat",axis:"r",width:1.2}],
       fmtL: ghz, fmtR: v => v.toFixed(0) + "%"});
   }
+  if (heatSeen)
+    chart($("#c7"), {...common, rows, h: 92,
+      title: "cpu temp \u00b7 fan rpm (right)",
+      // Fixed to 100°C rather than scaled to whatever happened: a CPU is at
+      // its limit around there, so the height of the line means something on
+      // its own, and means the same thing on every range.
+      maxL: 100,
+      defs: [{key:"tempMaxC",color:"--temp",kind:"area",opacity:.12,width:.8,dash:"2 2"},
+             {key:"tempC",color:"--temp",kind:"area"},
+             {key:"fan",color:"--fan",axis:"r",width:1.2}],
+      fmtL: v => v.toFixed(0) + "\u00b0C", fmtR: krpm, floorR: 1000});
   if (wattsSeen)
     chart($("#c6"), {...common, rows, h: 92,
       // The title doubles as the legend: two bands, coloured in place, so
@@ -833,11 +866,14 @@ function renderSystem(d){
       <tr><td>load</td><td>${r.load.toFixed(2)} <span class="muted">peak ${r.loadMax.toFixed(2)}</span></td></tr>
       ${r.freq == null ? "" : `<tr><td>cpu clock</td><td>${ghz(r.freq)}${r.freqMax ? ` <span class="muted">of ${ghz(r.freqMax)}</span>` : ""}</td></tr>`}
       ${r.thr ? `<tr><td>throttled</td><td>${r.thr}\u00d7${r.thrMs ? ` · ${(r.thrMs/1000).toFixed(1)}s` : ""}</td></tr>` : ""}
+      ${r.temp == null ? "" : `<tr><td>cpu temp</td><td>${degC(r.temp)}${r.tempMax > r.temp ? ` <span class="muted">peak ${degC(r.tempMax)}</span>` : ""}</td></tr>`}
+      ${r.fan == null ? "" : `<tr><td>fan</td><td>${r.fan ? `${Math.round(r.fan)} rpm` : "off"}${r.fanMax > r.fan ? ` <span class="muted">peak ${Math.round(r.fanMax)} rpm</span>` : ""}</td></tr>`}
       ${r.bat == null ? "" : `<tr><td>battery</td><td>${r.bat.toFixed(0)}%${r.batW ? ` <span class="muted">${r.batW < 0 ? "\u2193" : "\u2191"}${watts(r.batW)}</span>` : ""}</td></tr>`}
       ${r.ac == null ? "" : `<tr><td>power</td><td>${r.ac >= 0.5 ? "on AC" : "on battery"}${r.ac > 0 && r.ac < 1 ? ` <span class="muted">(changed in this bucket)</span>` : ""}</td></tr>`}
       </table>`};
   };
-  for (const id of ["#c1", "#c2", "#c3", "#c4", "#c5", "#c6"]) if ($(id)) wireHover($(id), hover);
+  for (const id of ["#c1", "#c2", "#c3", "#c4", "#c5", "#c6", "#c7"])
+    if ($(id)) wireHover($(id), hover);
   const inc = d.incidents.length;
   $("#sysSub").textContent = `${rows.length} points · ${dur(d.bucket)} each · `
     + `${stamp(d.from)} → ${stamp(d.to)}` + (inc ? ` · ${inc} incident${inc>1?"s":""}` : "");

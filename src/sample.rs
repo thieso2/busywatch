@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::util::fmt_bytes;
@@ -314,6 +315,117 @@ pub fn read_cpu_clock() -> CpuClock {
     c
 }
 
+// ------------------------------------------------------------------ thermal
+
+/// What the machine is doing about heat: how hot the CPU is, and how hard the
+/// fan is working to keep it there.
+///
+/// Both are optional and often absent: a desktop may expose no fan tachometer
+/// at all, a VM exposes neither, and which hwmon driver carries the CPU
+/// temperature differs between Intel, AMD and everything else.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Thermal {
+    /// Millidegrees C, the way hwmon reports it, so nothing is lost to
+    /// rounding before it reaches the database.
+    pub cpu_temp_mc: Option<i64>,
+    /// The fastest fan on the machine. A laptop with two fans has one story —
+    /// how hard is it working — and the loudest fan tells it.
+    pub fan_rpm: Option<u64>,
+    /// What that fan tops out at, where the driver says so. Only useful for
+    /// showing the current speed as a share of it, so it is not recorded.
+    pub fan_max_rpm: Option<u64>,
+}
+
+impl Thermal {
+    pub fn summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(t) = self.cpu_temp_mc {
+            parts.push(format!("{:.0}°C", t as f64 / 1000.0));
+        }
+        match (self.fan_rpm, self.fan_max_rpm) {
+            (Some(0), _) => parts.push("fan idle".to_string()),
+            (Some(r), Some(m)) if m > 0 => {
+                parts.push(format!("fan {r} rpm ({:.0}% of {m})", r as f64 / m as f64 * 100.0))
+            }
+            (Some(r), _) => parts.push(format!("fan {r} rpm")),
+            (None, _) => {}
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+}
+
+/// How much a hwmon driver deserves to be believed as *the* CPU temperature.
+/// coretemp and k10temp read the on-die sensor; acpitz is a firmware guess at
+/// something near it and is the last resort rather than the answer.
+fn cpu_temp_rank(name: &str) -> Option<u8> {
+    match name {
+        "coretemp" | "k10temp" | "zenpower" => Some(3),
+        // Apple silicon and some ARM boards; a real die sensor under a
+        // different name.
+        "cpu_thermal" | "soc_thermal" => Some(2),
+        "acpitz" => Some(1),
+        _ => None,
+    }
+}
+
+/// The sensor within a driver that means "the whole package", not one core.
+fn pkg_label_rank(label: &str) -> u8 {
+    let l = label.to_ascii_lowercase();
+    if l.starts_with("package") || l == "tdie" || l == "tctl" {
+        2
+    } else if l.starts_with("core") {
+        0 // a single core runs hotter or cooler than the part; prefer neither
+    } else {
+        1
+    }
+}
+
+/// One pass over /sys/class/hwmon.  Around thirty small reads a minute, which
+/// is nothing next to the /proc sweep that follows it.
+pub fn read_thermal() -> Thermal {
+    let mut t = Thermal::default();
+    let Ok(dir) = fs::read_dir("/sys/class/hwmon") else { return t };
+    let mut entries: Vec<_> = dir.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    // Best (driver, sensor) pair seen so far.
+    let mut best: Option<(u8, u8, i64)> = None;
+    for base in entries {
+        let name = fs::read_to_string(base.join("name"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let num = |f: &Path| fs::read_to_string(f).ok().and_then(|s| s.trim().parse::<i64>().ok());
+        // Sensor numbering is not dense and not bounded; ten is well past
+        // what any of these drivers expose.
+        for i in 1..=10 {
+            if let Some(rank) = cpu_temp_rank(&name) {
+                if let Some(mc) = num(&base.join(format!("temp{i}_input"))) {
+                    // A sensor that has been unplugged reads 0; a CPU at 0°C
+                    // is a broken sensor, not a cold one.
+                    let label = fs::read_to_string(base.join(format!("temp{i}_label")))
+                        .unwrap_or_default();
+                    let lr = pkg_label_rank(label.trim());
+                    if mc > 0 && best.map_or(true, |(r, l, _)| (rank, lr) > (r, l)) {
+                        best = Some((rank, lr, mc));
+                    }
+                }
+            }
+            if let Some(rpm) = num(&base.join(format!("fan{i}_input"))) {
+                if rpm >= 0 {
+                    let rpm = rpm as u64;
+                    if t.fan_rpm.map_or(true, |cur| rpm > cur) {
+                        t.fan_rpm = Some(rpm);
+                        t.fan_max_rpm = num(&base.join(format!("fan{i}_max")))
+                            .filter(|m| *m > 0)
+                            .map(|m| m as u64);
+                    }
+                }
+            }
+        }
+    }
+    t.cpu_temp_mc = best.map(|(_, _, mc)| mc);
+    t
+}
+
 // ---------------------------------------------------------------- sweeping
 
 pub struct ProcSnap {
@@ -525,4 +637,46 @@ pub fn psi_summary(path: &str) -> String {
             })
         })
         .unwrap_or_else(|| "?".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Which sensor is read decides whether the chart shows the part or one
+    /// hot core, and the two differ by several degrees under load.
+    #[test]
+    fn picks_the_package_sensor_over_a_single_core() {
+        assert!(pkg_label_rank("Package id 0") > pkg_label_rank("Core 1"));
+        assert!(pkg_label_rank("Tdie") > pkg_label_rank("Core 0"));
+        assert!(pkg_label_rank("") > pkg_label_rank("Core 3"));
+    }
+
+    /// acpitz is a firmware guess at something near the CPU; where a real die
+    /// sensor exists it has to win.
+    #[test]
+    fn prefers_a_die_sensor_over_the_firmware_guess() {
+        assert!(cpu_temp_rank("coretemp") > cpu_temp_rank("acpitz"));
+        assert!(cpu_temp_rank("k10temp") > cpu_temp_rank("acpitz"));
+        assert_eq!(cpu_temp_rank("nvme"), None);
+        assert_eq!(cpu_temp_rank("BAT0"), None);
+    }
+
+    /// Whatever the machine this runs on happens to expose, it must come back
+    /// either absent or plausible — never a 0 K CPU or a 200 000 rpm fan,
+    /// which is what a misread sysfs file looks like.
+    #[test]
+    fn reads_this_machine_or_says_nothing() {
+        let t = read_thermal();
+        if let Some(mc) = t.cpu_temp_mc {
+            assert!((5_000..=125_000).contains(&mc), "implausible temperature {mc}");
+        }
+        if let Some(r) = t.fan_rpm {
+            assert!(r <= 30_000, "implausible fan speed {r}");
+        }
+        // A machine with neither says nothing at all rather than "0°C, fan off".
+        if t.cpu_temp_mc.is_none() && t.fan_rpm.is_none() {
+            assert_eq!(t.summary(), None);
+        }
+    }
 }

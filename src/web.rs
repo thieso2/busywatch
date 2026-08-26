@@ -187,7 +187,8 @@ impl Server {
                       \"io\":{},\"ioMax\":{},\"load\":{},\"loadMax\":{},\
                       \"memUsed\":{},\"memUsedMax\":{},\"memTotal\":{},\"swap\":{},\"n\":{},\
                       \"ac\":{},\"bat\":{},\"batW\":{},\"freq\":{},\"freqMax\":{},\
-                      \"thr\":{},\"thrMs\":{}}}",
+                      \"thr\":{},\"thrMs\":{},\
+                      \"temp\":{},\"tempMax\":{},\"fan\":{},\"fanMax\":{}}}",
                     b.t,
                     json_num(b.cpu_avg),
                     json_num(b.cpu_max),
@@ -208,7 +209,11 @@ impl Server {
                     json_opt_num(b.freq_khz),
                     json_opt_num(b.freq_max_khz),
                     opt_i64(b.throttled),
-                    opt_i64(b.throttled_ms)
+                    opt_i64(b.throttled_ms),
+                    json_opt_num(b.cpu_temp_mc),
+                    json_opt_num(b.cpu_temp_max_mc),
+                    json_opt_num(b.fan_rpm),
+                    json_opt_num(b.fan_max_rpm)
                 ));
             }
         }
@@ -430,6 +435,7 @@ fn live_json() -> String {
     let m = read_meminfo();
     let pw = sample::read_power();
     let ck = sample::read_cpu_clock();
+    let th = sample::read_thermal();
     format!(
         "{{\"cpu\":{{\"avg10\":{},\"avg60\":{},\"avg300\":{}}},\
           \"mem\":{{\"avg10\":{},\"avg60\":{},\"avg300\":{}}},\
@@ -437,7 +443,8 @@ fn live_json() -> String {
           \"load\":{},\"cores\":{},\"memTotal\":{},\"memAvail\":{},\
           \"swapTotal\":{},\"swapUsed\":{},\
           \"acOnline\":{},\"batPct\":{},\"batStatus\":{},\"batPowerUw\":{},\
-          \"cpuFreqKhz\":{},\"cpuFreqMaxKhz\":{},\"throttleCount\":{},\"throttleMs\":{}}}",
+          \"cpuFreqKhz\":{},\"cpuFreqMaxKhz\":{},\"throttleCount\":{},\"throttleMs\":{},\
+          \"cpuTempMc\":{},\"fanRpm\":{},\"fanMaxRpm\":{}}}",
         json_num(p.cpu.avg10),
         json_num(p.cpu.avg60),
         json_num(p.cpu.avg300),
@@ -467,6 +474,9 @@ fn live_json() -> String {
         opt_i64(ck.freq_max_khz.map(|v| v as i64)),
         opt_i64(ck.throttle_count.map(|v| v as i64)),
         opt_i64(ck.throttle_ms.map(|v| v as i64)),
+        opt_i64(th.cpu_temp_mc),
+        opt_i64(th.fan_rpm.map(|v| v as i64)),
+        opt_i64(th.fan_max_rpm.map(|v| v as i64)),
     )
 }
 

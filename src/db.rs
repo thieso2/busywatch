@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags};
 
-use crate::sample::{io_rate, top_by, Consumer, CpuClock, MemInfo, Power, Pressures};
+use crate::sample::{io_rate, top_by, Consumer, CpuClock, MemInfo, Power, Pressures, Thermal};
 use crate::util::unix_now;
 
 /// What kind of resource an incident is about.
@@ -72,6 +72,7 @@ pub struct Reading {
     pub load1: f64,
     pub power: Power,
     pub clock: CpuClock,
+    pub thermal: Thermal,
 }
 
 fn ensure_columns(conn: &Connection, table: &str, cols: &[(&str, &str)]) -> rusqlite::Result<()> {
@@ -209,9 +210,10 @@ impl Db {
                                  mem_avg10, mem_avg60, io_avg10, io_avg60,
                                  mem_total_kb, mem_avail_kb, swap_total_kb, swap_used_kb,
                                  ac_online, bat_pct, bat_status, bat_power_uw,
-                                 cpu_freq_khz, cpu_freq_max_khz, throttle_count, throttle_ms)
+                                 cpu_freq_khz, cpu_freq_max_khz, throttle_count, throttle_ms,
+                                 cpu_temp_mc, fan_rpm)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
-                     ?14,?15,?16,?17,?18,?19,?20,?21)",
+                     ?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
             params![
                 incident_id,
                 ts,
@@ -234,6 +236,8 @@ impl Db {
                 r.clock.freq_max_khz.map(|v| v as i64),
                 r.clock.throttle_count.map(|v| v as i64),
                 r.clock.throttle_ms.map(|v| v as i64),
+                r.thermal.cpu_temp_mc,
+                r.thermal.fan_rpm.map(|v| v as i64),
             ],
         )?;
         let sid = tx.last_insert_rowid();
@@ -325,7 +329,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              -- Clock: freq_* are means across CPUs in kHz; throttle_* are
              -- cumulative since boot, so take deltas between samples.
              cpu_freq_khz INTEGER, cpu_freq_max_khz INTEGER,
-             throttle_count INTEGER, throttle_ms INTEGER
+             throttle_count INTEGER, throttle_ms INTEGER,
+             -- Thermal: millidegrees C off the die sensor, and the fastest
+             -- fan in rpm.  NULL where the machine exposes no such sensor —
+             -- a VM, or a desktop with no tachometer.
+             cpu_temp_mc INTEGER, fan_rpm INTEGER
          );
          CREATE TABLE IF NOT EXISTS app_sample (
              ts INTEGER NOT NULL,
@@ -377,6 +385,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             ("cpu_freq_max_khz", "INTEGER"),
             ("throttle_count", "INTEGER"),
             ("throttle_ms", "INTEGER"),
+            ("cpu_temp_mc", "INTEGER"),
+            ("fan_rpm", "INTEGER"),
         ],
     )?;
     ensure_columns(conn, "consumer", &[("ts", "INTEGER NOT NULL DEFAULT 0")])?;
@@ -504,6 +514,10 @@ pub struct Bucket {
     /// and is dropped rather than drawn as a spike.
     pub throttled: Option<i64>,
     pub throttled_ms: Option<i64>,
+    pub cpu_temp_mc: Option<f64>,
+    pub cpu_temp_max_mc: Option<f64>,
+    pub fan_rpm: Option<f64>,
+    pub fan_max_rpm: Option<f64>,
 }
 
 pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::Result<Vec<Bucket>> {
@@ -519,7 +533,9 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
                 AVG(ac_online), AVG(bat_pct), AVG(bat_power_uw),
                 AVG(cpu_freq_khz), AVG(cpu_freq_max_khz),
                 MAX(throttle_count) - MIN(throttle_count),
-                MAX(throttle_ms) - MIN(throttle_ms)
+                MAX(throttle_ms) - MIN(throttle_ms),
+                AVG(cpu_temp_mc), MAX(cpu_temp_mc),
+                AVG(fan_rpm), MAX(fan_rpm)
            FROM sample
           WHERE ts BETWEEN ?1 AND ?2
           GROUP BY b ORDER BY b",
@@ -554,6 +570,10 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
             freq_max_khz: r.get(18)?,
             throttled: r.get::<_, Option<i64>>(19)?.filter(|v| *v >= 0),
             throttled_ms: r.get::<_, Option<i64>>(20)?.filter(|v| *v >= 0),
+            cpu_temp_mc: r.get(21)?,
+            cpu_temp_max_mc: r.get(22)?,
+            fan_rpm: r.get(23)?,
+            fan_max_rpm: r.get(24)?,
         })
     })?;
     rows.collect()
