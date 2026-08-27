@@ -47,12 +47,17 @@ Hyprland:
 o.window({ class = "^.+busywatch\\.localhost.*-Default$" }, {
   float = true,
   center = true,
-  size = { 1200, 800 },
+  size = { "(monitor_w*0.8)", "(monitor_h*0.8)" },
 })
 ```
 
 Match on the class, not the title: a Chromium app window is titled after its
 URL until the page loads, and window rules are evaluated when the window maps.
+The class carries the browser's own prefix — Brave maps the window as
+`brave-busywatch.localhost__-Default` — which is what the leading `^.+` is
+there for. Sizing it as a fraction of the monitor rather than in pixels keeps
+it the same share of the screen on a laptop panel and an external display
+both.
 
 ## Tray icon
 
