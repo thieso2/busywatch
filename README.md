@@ -245,6 +245,25 @@ Two things are worth setting deliberately:
   The class alone would catch every other window the shell puts on screen, and
   the title alone is not worth trusting on its own.
 
+### Tests
+
+```sh
+shell/tests/run                          # 55 assertions, ~0.7s
+QT_QPA_PLATFORM=offscreen shell/tests/run   # headless
+```
+
+`qmltestrunner` drives a real scene graph, so these press the buttons rather
+than inspect them: a click on a range pill, on a column heading, on a row of the
+rundown; a pointer moved across a chart and off it again. The timeline gets the
+most attention, because it is the part with the least margin for error — that a
+night asleep collapses to a seam, that a three-minute suspend does not, that
+several nights together never take more than a fifth of the width, and that a
+time converted to a position and back is the same time.
+
+They need no Omarchy: `shell/tests/stubs/` stands in for the shell's `Style` and
+`Color` singletons, which cannot load outside `omarchy-shell` because they reach
+for Quickshell's own types.
+
 **Clicking a toast opens the plugin** where it is installed, on the resource
 that raised the warning and a range wide enough to cover the incident — the
 same three values the browser URL carried in its hash, handed over as the

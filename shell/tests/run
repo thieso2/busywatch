@@ -1,0 +1,20 @@
+#!/bin/bash
+# Run the plugin's QML tests.
+#
+# They synthesise real mouse events into a real scene graph, so this covers the
+# clicking and hovering that a screenshot cannot vouch for, as well as the
+# timeline and unit maths. Nothing here needs Omarchy running: `stubs/` stands
+# in for the shell's Style and Color singletons, which cannot load outside
+# omarchy-shell because they reach for Quickshell's own types.
+#
+# Needs a display. Under a headless CI, run it with `QT_QPA_PLATFORM=offscreen`.
+set -euo pipefail
+
+runner=/usr/lib/qt6/bin/qmltestrunner
+[[ -x $runner ]] || runner=$(command -v qmltestrunner) || {
+  echo "qmltestrunner not found (Arch: pacman -S qt6-declarative)" >&2
+  exit 1
+}
+
+cd "$(dirname "$0")"
+exec "$runner" -input . -import stubs "$@"
