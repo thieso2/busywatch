@@ -1,0 +1,23 @@
+pkgbase = busywatch-git
+	pkgdesc = Warns when the system is too busy, and keeps a per-app history of CPU, memory and IO with a built-in web UI and an Omarchy shell plugin
+	pkgver = r16.a30047c
+	pkgrel = 1
+	url = https://github.com/thieso2/busywatch
+	install = busywatch.install
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	makedepends = git
+	depends = gcc-libs
+	depends = glibc
+	optdepends = libnotify: desktop notifications when no Omarchy notification sender is present
+	optdepends = xdg-utils: open the history UI when a warning toast is clicked
+	optdepends = omarchy: draw the history in the shell instead of a browser — `omarchy plugin add` this same repository
+	provides = busywatch
+	conflicts = busywatch
+	options = !lto
+	source = busywatch::git+https://github.com/thieso2/busywatch.git
+	sha256sums = SKIP
+
+pkgname = busywatch-git

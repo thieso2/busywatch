@@ -1,9 +1,9 @@
 # Maintainer: Thies C. Arntzen <thieso@gmail.com>
 pkgname=busywatch-git
 _pkgname=busywatch
-pkgver=r3.abebe4c
+pkgver=r16.a30047c
 pkgrel=1
-pkgdesc="Warns when the system is too busy, and keeps a per-app history of CPU, memory and IO with a built-in web UI"
+pkgdesc="Warns when the system is too busy, and keeps a per-app history of CPU, memory and IO with a built-in web UI and an Omarchy shell plugin"
 arch=('x86_64' 'aarch64')
 url="https://github.com/thieso2/busywatch"
 license=('MIT')
@@ -12,6 +12,7 @@ makedepends=('cargo' 'git')
 optdepends=(
   'libnotify: desktop notifications when no Omarchy notification sender is present'
   'xdg-utils: open the history UI when a warning toast is clicked'
+  'omarchy: draw the history in the shell instead of a browser — `omarchy plugin add` this same repository'
 )
 # rusqlite's `bundled` feature compiles SQLite from C through the cc crate.
 # makepkg's global LTO would hand those objects to the linker as bitcode,
