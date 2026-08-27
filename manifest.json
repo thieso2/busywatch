@@ -5,8 +5,15 @@
   "version": "0.1.0",
   "author": "Thies C. Arntzen",
   "license": "MIT",
+  "homepage": "https://github.com/thieso2/busywatch",
   "description": "The busywatch history UI, drawn natively in the Omarchy shell: cpu/memory/io stall, load, clock, heat and power over 15m to 30d, the top apps stacked over time, and a drilldown for any one of them. Needs a busywatch daemon serving its read-only API on loopback.",
-  "kinds": ["service", "bar-widget", "panel"],
+  "icon": "assets/icon.svg",
+  "preview": "preview.png",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "panel"
+  ],
   "entryPoints": {
     "service": "shell/Service.qml",
     "barWidget": "shell/BarWidget.qml",
@@ -16,7 +23,15 @@
     "displayName": "busywatch",
     "description": "A dot in the colour of whatever is stalling; the history window opens on click.",
     "category": "System",
-    "aliases": ["busywatch", "pressure", "psi", "stall", "monitor", "load", "hogs"],
+    "aliases": [
+      "busywatch",
+      "pressure",
+      "psi",
+      "stall",
+      "monitor",
+      "load",
+      "hogs"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {

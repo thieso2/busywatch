@@ -1,7 +1,17 @@
 # busywatch
 
 Warns when the system is too busy, at near-zero cost — and keeps a history of
-what made it busy, browsable in a web UI.
+what made it busy, browsable in a web UI or, on Omarchy, in a shell plugin that
+draws the same history natively.
+
+The plugin is the UI; it reads from a busywatch daemon over loopback, so the
+watcher is installed separately (`packaging/` has a PKGBUILD, or `cargo build`).
+
+```sh
+omarchy plugin add https://github.com/thieso2/busywatch.git
+```
+
+![the history, drawn by the Omarchy shell](preview.png)
 
 Instead of polling, busywatch registers **PSI triggers** with the kernel
 (`/proc/pressure/{cpu,memory,io}`) and sleeps in `poll()` until the kernel

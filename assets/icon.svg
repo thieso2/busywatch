@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="busywatch">
+  <!-- The mark is the bar widget: a ring in the colour of the verdict, quiet
+       here, with the stall trace it is watching drawn through it. -->
+  <rect width="128" height="128" rx="28" fill="#16191d"/>
+  <path d="M22 78 L34 78 L41 62 L48 86 L56 52 L64 92 L72 66 L80 78 L106 78"
+        fill="none" stroke="#ff7a5e" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+  <circle cx="64" cy="64" r="34" fill="none" stroke="#4cc38a" stroke-width="10"/>
+</svg>
