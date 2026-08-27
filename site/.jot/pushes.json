@@ -1,0 +1,15 @@
+[
+  {
+    "slug": "busywatch",
+    "url": "https://busywatch.jot.moyn.dev/",
+    "title": "busywatch — a watcher that spends its life asleep",
+    "summary": "Marketing site for busywatch, the Linux PSI-trigger system watcher. Screenshots are real captures of the history UI served from a generated sample database; CLI output and toast text are copied verbatim from the program.",
+    "tags": [
+      "busywatch",
+      "marketing",
+      "site"
+    ],
+    "pushed_at": "2026-08-27T17:48:14.157066193Z",
+    "pushed_by": "thies@moyn.dev"
+  }
+]

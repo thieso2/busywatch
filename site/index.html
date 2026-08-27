@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>busywatch — a watcher that spends its life asleep</title>
+<meta name="description" content="busywatch warns when your Linux desktop is too busy, at near-zero cost. It registers PSI triggers with the kernel, sleeps until something stalls, names the process responsible, and keeps a browsable history.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%231f8c63'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* paper: where the words live.  screen: where the machine lives. */
+  --paper:#e8eaf0; --paper-2:#fcfcfe; --ink:#12141a; --dim:#5b6274; --rule:#ccd2de;
+  --screen:#101218; --screen-2:#171a21; --screen-ink:#e6e8ec; --screen-dim:#98a0ad;
+  --screen-rule:#262a33;
+  /* the three things it watches, in the colours the program itself uses */
+  --cpu:#d4482e; --mem:#2e6dcb; --io:#b07c12; --ok:#1f8c63;
+  --cpu-s:#ff7a5e; --mem-s:#63a8ff; --io-s:#e8b552; --ok-s:#4cc38a;
+  --w:1140px;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:Archivo,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-stretch:100%; font-size:17px; line-height:1.6;
+  font-synthesis-weight:none; -webkit-font-smoothing:antialiased;
+}
+img{max-width:100%;display:block}
+a{color:inherit}
+
+/* ---------------------------------------------------------------- type */
+.eyebrow{
+  font-size:.7rem; font-stretch:74%; font-weight:600; text-transform:uppercase;
+  letter-spacing:.16em; color:var(--dim); margin:0 0 14px;
+  display:flex; align-items:center; gap:10px;
+}
+.eyebrow::after{content:"";flex:1;height:1px;background:var(--rule);opacity:.9}
+.on-screen .eyebrow{color:var(--screen-dim)}
+.on-screen .eyebrow::after{background:var(--screen-rule);opacity:1}
+
+h1,h2,h3{margin:0; font-stretch:112%; font-weight:640; line-height:1.02; letter-spacing:-.018em}
+h1{font-size:clamp(2.7rem,6.4vw,4.7rem); letter-spacing:-.03em}
+h2{font-size:clamp(1.8rem,3.4vw,2.5rem)}
+h3{font-size:1.06rem; font-stretch:104%; font-weight:640; letter-spacing:-.005em; line-height:1.3}
+p{margin:0 0 1em}
+.lead{font-size:clamp(1.08rem,1.7vw,1.3rem); line-height:1.55; color:#2b303c; max-width:62ch}
+.on-screen .lead{color:#c3c9d4}
+.note{font-size:.94rem;color:var(--dim);max-width:64ch}
+.on-screen .note{color:var(--screen-dim)}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.plate{
+  font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.72rem;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--dim);
+}
+.on-screen .plate{color:var(--screen-dim)}
+
+/* ---------------------------------------------------------------- bands */
+.band{padding:clamp(64px,9vw,116px) 24px}
+.band-screen{background:var(--screen); color:var(--screen-ink)}
+.band-tight{padding-top:clamp(40px,5vw,64px)}
+.wrap{max-width:var(--w); margin:0 auto}
+.rule{height:1px;background:var(--rule);border:0;margin:0}
+.band-screen .rule{background:var(--screen-rule)}
+
+/* -------------------------------------------------------------- masthead */
+.mast{
+  max-width:var(--w); margin:0 auto; padding:22px 0 0;
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+}
+.wordmark{font-stretch:104%;font-weight:700;font-size:1.1rem;letter-spacing:-.01em}
+.mast .plate{margin-left:auto}
+.mast a.plate{text-decoration:none;border-bottom:1px solid var(--rule);padding-bottom:2px}
+.mast a.plate:hover{color:var(--ink);border-color:var(--ink)}
+
+/* ------------------------------------------------------------------ hero */
+.hero{padding:clamp(44px,6vw,76px) 24px clamp(52px,6vw,84px)}
+.hero h1{max-width:16ch; margin-bottom:26px}
+.hero .lead{max-width:56ch}
+.hero-grid{display:grid;grid-template-columns:1fr;gap:34px}
+.getit{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:30px}
+.cmd{
+  font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.88rem;
+  background:var(--paper-2); border:1px solid var(--rule); border-radius:8px;
+  padding:11px 14px; display:inline-flex; gap:10px; align-items:center;
+}
+.cmd span{color:var(--dim)}
+.linkline{font-size:.9rem;color:var(--dim)}
+.linkline a{color:var(--ink);text-decoration-color:var(--rule);text-underline-offset:3px}
+
+/* ------------------------------------------------- the signature console */
+.console{
+  background:var(--screen); color:var(--screen-ink); border-radius:12px;
+  border:1px solid #23262e; overflow:hidden;
+  box-shadow:0 24px 60px -28px rgba(16,18,24,.5), 0 2px 0 rgba(255,255,255,.5);
+  font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.8rem;
+}
+.console-bar{
+  display:flex;align-items:center;gap:10px;padding:9px 14px;
+  border-bottom:1px solid var(--screen-rule); background:var(--screen-2);
+  font-size:.72rem; letter-spacing:.06em; color:var(--screen-dim);
+}
+.console-bar b{color:var(--screen-ink);font-weight:600;letter-spacing:0}
+.console-bar .state{margin-left:auto;transition:color .3s}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ok-s);flex:none;transition:background .4s}
+.dot.warn{background:var(--mem-s)}
+.console-body{display:grid;grid-template-columns:1fr;gap:0}
+.cpane{padding:14px 16px;border-top:1px solid var(--screen-rule)}
+.cpane:first-child{border-top:0}
+.cpane .plate{color:#7c8492;margin-bottom:9px;display:block}
+.psi{line-height:1.75;color:var(--screen-dim);white-space:pre;overflow-x:auto}
+.psi b{color:var(--screen-ink);font-weight:500}
+.psi .hot{color:var(--mem-s)}
+.tape{min-height:118px;line-height:1.75}
+.tape div{color:var(--screen-dim);opacity:0;transform:translateY(3px);transition:opacity .35s,transform .35s}
+.tape div.on{opacity:1;transform:none}
+.tape .k{color:#6f7embed}
+.tape .warnline{color:var(--mem-s)}
+.tape .okline{color:var(--ok-s)}
+
+/* toast: what the desktop actually shows */
+.toast{
+  background:#1c1f27;border:1px solid #2d323c;border-left:3px solid var(--mem-s);
+  border-radius:9px;padding:11px 13px;opacity:0;transform:translateY(6px);
+  transition:opacity .4s,transform .4s;
+}
+.toast.on{opacity:1;transform:none}
+.toast.ok{border-left-color:var(--ok-s)}
+.toast-h{font-family:Archivo,sans-serif;font-stretch:104%;font-weight:640;font-size:.95rem;
+  letter-spacing:-.01em;color:#fff;margin-bottom:5px;line-height:1.25}
+.toast-b{color:var(--screen-dim);font-size:.76rem;line-height:1.6;white-space:pre-wrap;min-height:4.8em}
+.toast-b em{font-style:normal;color:#cfd5df}
+.stage{position:relative}
+.quiet-note{
+  position:absolute;inset:0;display:flex;align-items:center;color:#666d7b;
+  transition:opacity .4s;font-size:.76rem;
+}
+.quiet-note.off{opacity:0}
+.pane-desktop{display:flex;flex-direction:column;justify-content:space-between}
+.tooltip-row{
+  display:flex;align-items:center;gap:9px;margin-top:16px;padding-top:13px;
+  border-top:1px solid var(--screen-rule);color:var(--screen-dim);font-size:.74rem;
+  flex-wrap:wrap;
+}
+.tooltip-row .plate{margin:0}
+.psi,.tape,.toast-b{font-variant-numeric:tabular-nums}
+.toast-f{margin-top:9px;font-size:.68rem;letter-spacing:.06em;text-transform:uppercase;color:#6d7482}
+
+/* --------------------------------------------------------------- the loop */
+.loop{display:grid;grid-template-columns:1fr;gap:0;margin-top:34px}
+.step{
+  padding:20px 0 20px 26px; border-left:2px solid var(--rule); position:relative;
+}
+.step:last-child{border-left-color:transparent}
+.step::before{
+  content:"";position:absolute;left:-6px;top:26px;width:10px;height:10px;border-radius:50%;
+  background:var(--paper);border:2px solid var(--dim);
+}
+.step.fire::before{background:var(--mem);border-color:var(--mem)}
+.step h3{margin-bottom:6px}
+.step p{margin:0;color:var(--dim);font-size:.98rem;max-width:56ch}
+.step .plate{display:block;margin-bottom:9px}
+
+/* thresholds */
+.thresh{margin-top:38px;border-top:1px solid var(--rule)}
+.trow{display:grid;grid-template-columns:120px 1fr;gap:16px;padding:15px 0;border-bottom:1px solid var(--rule);align-items:baseline}
+.tkey{display:flex;align-items:center;gap:9px;font-stretch:78%;font-weight:600;text-transform:uppercase;letter-spacing:.1em;font-size:.78rem}
+.tkey i{width:8px;height:8px;border-radius:2px;display:inline-block;font-style:normal}
+.i-cpu{background:var(--cpu)} .i-mem{background:var(--mem)} .i-io{background:var(--io)}
+.tval{font-size:.98rem;color:var(--dim)}
+.tval b{color:var(--ink);font-weight:600}
+.tval .mono{font-size:.86rem}
+
+/* ------------------------------------------------------------- toast row */
+.toasts{display:grid;grid-template-columns:1fr;gap:16px;margin-top:34px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.8rem}
+.toasts .toast{opacity:1;transform:none}
+.toast.cpu{border-left-color:var(--cpu-s)}
+.toast.io{border-left-color:var(--io-s)}
+
+/* tray verdicts */
+.verdicts{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:30px;
+  padding-top:24px;border-top:1px solid var(--screen-rule)}
+.verdict{display:flex;align-items:center;gap:9px;font-size:.88rem;color:var(--screen-dim)}
+.verdict b{color:var(--screen-ink);font-weight:500}
+.vd{width:10px;height:10px;border-radius:50%;flex:none}
+
+/* ------------------------------------------------------------ screenshots */
+.shot{
+  margin-top:36px;border-radius:11px;overflow:hidden;border:1px solid var(--screen-rule);
+  background:var(--screen-2); box-shadow:0 40px 80px -40px rgba(0,0,0,.75);
+}
+.band:not(.band-screen) .shot{box-shadow:0 34px 70px -34px rgba(18,20,26,.55)}
+.shot img{width:100%}
+.caption{display:flex;gap:10px 30px;flex-wrap:wrap;margin-top:16px}
+.cap{display:flex;gap:9px;align-items:flex-start;font-size:.86rem;color:var(--screen-dim);max-width:31ch}
+.band:not(.band-screen) .cap{color:var(--dim)}
+.cap i{width:3px;align-self:stretch;min-height:2.4em;border-radius:2px;flex:none;font-style:normal}
+.cap b{color:var(--screen-ink);font-weight:500}
+.band:not(.band-screen) .cap b{color:var(--ink)}
+
+/* ------------------------------------------------------------- two column */
+.two{display:grid;grid-template-columns:1fr;gap:34px;align-items:start}
+.two>*,.console-body>*,.install>*,.loop>*,.toasts>*,.spec>*{min-width:0}
+.two .lead{max-width:none}
+
+/* ------------------------------------------------------------- terminal */
+.term{
+  background:var(--screen-2);border:1px solid var(--screen-rule);border-radius:11px;
+  overflow:hidden;margin-top:22px;
+}
+.term-h{
+  padding:9px 14px;border-bottom:1px solid var(--screen-rule);background:#12151b;
+  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.74rem;color:var(--screen-dim);
+}
+.term-h b{color:var(--ok-s);font-weight:500}
+.term pre{
+  margin:0;padding:15px 16px;overflow-x:auto;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:.74rem;line-height:1.68;color:#c6ccd7;
+}
+.term pre b{color:#fff;font-weight:500}
+.term pre .d{color:#7b8391}
+.term pre .m{color:var(--mem-s)} .term pre .c{color:var(--cpu-s)} .term pre .o{color:var(--io-s)}
+
+/* ------------------------------------------------------------------ specs */
+.specs{margin-top:34px;border-top:1px solid var(--rule)}
+.spec{display:grid;grid-template-columns:1fr;gap:6px;padding:16px 0;border-bottom:1px solid var(--rule)}
+.spec dt{font-stretch:78%;font-weight:600;text-transform:uppercase;letter-spacing:.1em;font-size:.75rem;color:var(--dim)}
+.spec dd{margin:0;font-size:.98rem}
+.spec dd .mono{font-size:.86rem;background:rgba(18,20,26,.05);padding:1px 5px;border-radius:4px}
+
+/* ---------------------------------------------------------------- install */
+.install{display:grid;grid-template-columns:1fr;gap:28px;margin-top:34px}
+.recipe{background:var(--paper-2);border:1px solid var(--rule);border-radius:11px;overflow:hidden}
+.recipe-h{padding:13px 16px;border-bottom:1px solid var(--rule);display:flex;align-items:baseline;gap:10px}
+.recipe-h h3{font-size:.98rem}
+.recipe-h .plate{margin-left:auto}
+.recipe pre{margin:0;padding:15px 16px;overflow-x:auto;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:.79rem;line-height:1.85;color:#2a2f3b}
+.recipe pre .d{color:#8a91a1}
+.recipe pre b{color:var(--ink);font-weight:500}
+.warnbox{
+  margin-top:22px;border-left:3px solid var(--io);background:rgba(176,124,18,.08);
+  padding:14px 16px;border-radius:0 8px 8px 0;font-size:.94rem;
+}
+.warnbox b{font-weight:600}
+
+/* ----------------------------------------------------------------- origin */
+.origin{max-width:66ch}
+.origin blockquote{
+  margin:0 0 22px;font-stretch:106%;font-weight:500;line-height:1.32;letter-spacing:-.015em;
+  font-size:clamp(1.35rem,2.7vw,1.9rem);
+}
+.origin blockquote span{color:var(--dim)}
+
+footer{padding:34px 24px 56px;border-top:1px solid var(--rule)}
+.foot{max-width:var(--w);margin:0 auto;display:flex;gap:16px 26px;flex-wrap:wrap;align-items:center}
+.foot .plate{color:var(--dim)}
+.foot .plate:last-child{margin-left:auto}
+
+/* --------------------------------------------------------------- responsive */
+@media (min-width:620px){
+  .spec{grid-template-columns:200px 1fr;gap:20px}
+}
+@media (min-width:760px){
+  .console-body{grid-template-columns:1.06fr 1fr}
+  .cpane{border-top:0;border-left:1px solid var(--screen-rule)}
+  .cpane:first-child{border-left:0}
+  .toasts{grid-template-columns:repeat(3,1fr)}
+  .install{grid-template-columns:1fr 1fr}
+  .loop{grid-template-columns:repeat(2,1fr);gap:0 40px}
+}
+@media (min-width:1000px){
+  .hero-grid{grid-template-columns:1fr;gap:44px}
+  .two{grid-template-columns:1.05fr .95fr;gap:56px}
+  .loop{grid-template-columns:repeat(4,1fr);gap:0 26px}
+  .step{border-left:0;border-top:2px solid var(--rule);padding:26px 20px 0 0}
+  .step:last-child{border-top-color:var(--rule)}
+  .step::before{left:0;top:-6px}
+}
+:focus-visible{outline:2px solid var(--mem);outline-offset:3px;border-radius:3px}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<div class="mast">
+  <span class="dot" aria-hidden="true"></span>
+  <span class="wordmark">busywatch</span>
+  <a class="plate" href="https://github.com/thieso2/busywatch">github.com/thieso2/busywatch</a>
+</div>
+
+<!-- ==================================================================== hero -->
+<header class="band hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Pressure stall information · desktop notifications · history</p>
+      <h1>A watcher that spends its life asleep.</h1>
+      <p class="lead">busywatch does not poll your machine. It hands the kernel a threshold
+      and blocks. When something stalls your desktop, it wakes up, names the process
+      responsible, and writes down what happened — so the thing that ate an hour while
+      you were away is still there to find.</p>
+      <div class="getit">
+        <code class="cmd"><span>$</span> git clone https://github.com/thieso2/busywatch</code>
+        <span class="linkline">Two dependencies. Under 2&nbsp;MB. <a href="#install">Build and install →</a></span>
+      </div>
+    </div>
+
+    <!-- the signature: the program's actual loop, running -->
+    <div class="console" id="loopdemo" role="img"
+         aria-label="Animation of busywatch: it is blocked in poll(), the kernel's memory pressure trigger fires, the sustained average crosses the threshold, and a desktop notification names brave as the process holding the memory.">
+      <div class="console-bar">
+        <span class="dot" id="d-dot"></span>
+        <b>busywatch</b>
+        <span>tray</span>
+        <span class="state" id="d-state">blocked in poll() · 0.0% cpu</span>
+      </div>
+      <div class="console-body">
+        <div class="cpane">
+          <span class="plate">/proc/pressure/memory</span>
+          <div class="psi" id="d-psi"></div>
+          <span class="plate" style="margin:14px 0 9px">journal</span>
+          <div class="tape" id="d-tape"></div>
+        </div>
+        <div class="cpane pane-desktop">
+          <span class="plate">your desktop</span>
+          <div class="stage">
+            <div class="quiet-note" id="d-quiet">nothing has stalled · no notification</div>
+          <div class="toast" id="d-toast">
+            <div class="toast-h" id="t-head">Memory is running low</div>
+            <div class="toast-b" id="t-body"></div>
+            <div class="toast-f">click to open the history</div>
+          </div>
+          </div>
+          <div class="tooltip-row">
+            <span class="dot" id="d-dot2"></span>
+            <span class="plate" style="letter-spacing:.06em">tray tooltip</span>
+            <span id="d-tip">cpu 0.1% · mem 0.0% · io 0.0% · load 0.48</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<hr class="rule">
+
+<!-- ==================================================================== loop -->
+<section class="band">
+  <div class="wrap">
+    <p class="eyebrow">How it costs nothing</p>
+    <h2>The kernel does the watching.</h2>
+    <p class="lead" style="margin-top:18px">Linux already measures how long tasks spend stalled
+    waiting for CPU, memory and IO. busywatch registers a trigger on those files and sleeps in
+    <code class="mono">poll()</code> until the kernel decides there is something to say.</p>
+
+    <div class="loop">
+      <div class="step">
+        <span class="plate">register</span>
+        <h3>Hand the kernel a threshold</h3>
+        <p>One write to each of <code class="mono">/proc/pressure/{cpu,memory,io}</code>: wake me
+        if tasks stall 500&nbsp;ms inside any 1&nbsp;s window.</p>
+      </div>
+      <div class="step">
+        <span class="plate">sleep</span>
+        <h3>Block, and use no CPU</h3>
+        <p>No timer, no sampling loop, nothing on a schedule. The process sits in
+        <code class="mono">poll()</code> until the kernel wakes it.</p>
+      </div>
+      <div class="step fire">
+        <span class="plate">wake</span>
+        <h3>Check the sustained average</h3>
+        <p>A trigger alone is not a warning — a compile or a page load fires them constantly.
+        Only <code class="mono">avg60</code> over the threshold counts.</p>
+      </div>
+      <div class="step">
+        <span class="plate">warn</span>
+        <h3>Name the process, open an incident</h3>
+        <p>A toast with the top consumers, then a re-check every 10&nbsp;s until pressure halves —
+        and an all-clear that replaces it.</p>
+      </div>
+    </div>
+
+    <div class="thresh">
+      <div class="trow">
+        <span class="tkey"><i class="i-cpu"></i>cpu</span>
+        <span class="tval">CPU stall <b class="mono">avg60 ≥ 20%</b></span>
+      </div>
+      <div class="trow">
+        <span class="tkey"><i class="i-mem"></i>memory</span>
+        <span class="tval">memory stall <b class="mono">avg60 ≥ 10%</b> — <b>or</b> MemAvailable under
+        <b class="mono">10%</b> of RAM, which catches the process eating your RAM
+        <em>before</em> the kernel starts stalling on it. By the time memory pressure is high the
+        machine is already crawling.</span>
+      </div>
+      <div class="trow">
+        <span class="tkey"><i class="i-io"></i>io</span>
+        <span class="tval">IO stall <b class="mono">avg60 ≥ 25%</b></span>
+      </div>
+    </div>
+    <p class="note" style="margin-top:22px">Every threshold is a flag. Without
+    <code class="mono">CAP_SYS_RESOURCE</code> — or on a kernel without PSI — it falls back to
+    reading the same files every ten seconds, which is still a few hundred bytes of IO.</p>
+  </div>
+</section>
+
+<!-- =================================================================== warns -->
+<section class="band band-screen on-screen">
+  <div class="wrap">
+    <p class="eyebrow">What a warning says</p>
+    <h2>Not “something is slow”. <em style="font-style:normal;color:var(--mem-s)">This</em> is slow.</h2>
+    <p class="lead" style="margin-top:18px">The notification carries the numbers that tripped it and
+    the processes at the top of the list, summed per command name — so a browser's hundred renderers
+    read as one culprit, not a hundred rows of noise.</p>
+
+    <div class="toasts">
+      <div class="toast">
+        <div class="toast-h">Memory is running low</div>
+        <div class="toast-b">2.3GB of 16.0GB available (14%), memory stall avg60=31%, swap 3.4GB
+top: <em>brave(1000) 4.0GB, brave(1001) 2.4GB, brave(1002) 1.7GB</em></div>
+      </div>
+      <div class="toast cpu">
+        <div class="toast-h">System is too busy</div>
+        <div class="toast-b">CPU pressure avg10=71% avg60=56% load=9.42
+top: <em>rustc(1411) 231%, cargo(1548) 151%, rustc(1412) 136%</em></div>
+      </div>
+      <div class="toast ok">
+        <div class="toast-h">Memory back to normal</div>
+        <div class="toast-b">mem pressure avg60=3% — was busy for 1h28m, peak 31%, now 9.1GB available — <em>brave</em></div>
+      </div>
+    </div>
+
+    <p class="note" style="margin-top:26px">Each resource owns its own toast, so a memory warning
+    never silently erases a CPU one, and the all-clear replaces the warning it belongs to.
+    Clicking either opens the history — as a chromeless window, on the resource that raised it,
+    over a range wide enough to hold the whole incident.</p>
+
+    <div class="verdicts">
+      <span class="verdict"><i class="vd" style="background:var(--ok-s)"></i><b>quiet</b> nothing stalling</span>
+      <span class="verdict"><i class="vd" style="background:var(--cpu-s)"></i><b>cpu</b> incident running</span>
+      <span class="verdict"><i class="vd" style="background:var(--mem-s)"></i><b>memory</b> incident running</span>
+      <span class="verdict"><i class="vd" style="background:var(--io-s)"></i><b>io</b> incident running</span>
+      <span class="verdict" style="color:#6d7482">— the tray icon is the current verdict; its tooltip carries the live pressures.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================= history -->
+<section class="band band-screen on-screen" style="padding-top:0">
+  <div class="wrap">
+    <hr class="rule" style="margin-bottom:clamp(56px,7vw,92px)">
+    <p class="eyebrow">The history</p>
+    <h2>Three days of your machine, at a glance.</h2>
+    <p class="lead" style="margin-top:18px">A heartbeat sample every minute — and every ten seconds
+    while an incident runs, so the record is dense exactly where it matters. The page charts
+    15&nbsp;minutes to 30&nbsp;days, embeds everything it needs, and is served read-only on loopback.</p>
+
+    <figure class="shot" style="margin-bottom:0">
+      <img src="shots/history.webp" width="1960" alt="The busywatch history UI: stacked charts of CPU, memory and IO stall, load, swap, CPU clock and battery, temperature and fan, and battery watts, with incidents shaded; below them a stacked chart of applications by memory and a sortable rundown table; at the bottom a table of recorded incidents with their culprits.">
+    </figure>
+    <figcaption class="caption">
+      <span class="cap"><i style="background:var(--mem-s)"></i><b>Shaded bands</b> are recorded incidents, on every chart at once.</span>
+      <span class="cap"><i style="background:#7c8492"></i><b>Seams</b> collapse the hours the machine was asleep, so recorded time gets the width.</span>
+      <span class="cap"><i style="background:var(--io-s)"></i><b>Throttled stretches</b> are shaded under the clock — with the temperature and fan that made them.</span>
+      <span class="cap"><i style="background:var(--ok-s)"></i><b>Draw and charge</b> are drawn apart, so a laptop running the fan and the battery down at once shows both.</span>
+    </figcaption>
+  </div>
+</section>
+
+<!-- ================================================================ rundown -->
+<section class="band band-screen on-screen" style="padding-top:0">
+  <div class="wrap">
+    <p class="eyebrow">Per application</p>
+    <h2>Summed before the ranking.</h2>
+    <div class="two" style="margin-top:18px">
+      <p class="lead">Every process is counted under its command name, so twenty renderers are one
+      row — and the totals are summed <em>before</em> the top-N cut, so the number is the real total,
+      not the sum of whichever processes happened to make the list.</p>
+      <p class="note">Switch the stack between memory, CPU and IO. Filter and sort the rundown on any
+      column: RSS now, peak and average, CPU time, peak and average CPU, bytes read and written, how
+      many pids, when it was last seen.</p>
+    </div>
+    <figure class="shot">
+      <img src="shots/apps.webp" width="1960" loading="lazy" alt="A stacked area chart of applications by memory over three days, with brave growing steadily, above a sortable table of twelve applications showing RSS now, peak and average, CPU time, peak and average CPU, IO read and written, pid count and when each was last seen.">
+    </figure>
+  </div>
+</section>
+
+<!-- =============================================================== drilldown -->
+<section class="band band-screen on-screen" style="padding-top:0">
+  <div class="wrap">
+    <p class="eyebrow">One application</p>
+    <h2>Click a name, get its whole story.</h2>
+    <p class="lead" style="margin-top:18px">From the rundown, the legend, or an incident's culprit:
+    what it added up to, its memory, CPU and IO over the range, every pid that carried it, and the
+    incidents it was blamed for. The view lives in the URL, so a reload comes back where you were.</p>
+    <figure class="shot">
+      <img src="shots/drilldown.webp" width="1960" loading="lazy" alt="The drilldown for brave: tiles reading 10 hours 3 minutes of CPU time, 87% peak CPU, 13GB peak RSS at 75% of RAM, 12GB read and 4GB written, 4 pids, one incident caused; below them its RSS, CPU and IO charts, a table of pids and the memory incident it was blamed for.">
+    </figure>
+    <figcaption class="caption">
+      <span class="cap"><i style="background:var(--mem-s)"></i><b>13GB peak</b> — and what share of RAM that was.</span>
+      <span class="cap"><i style="background:var(--cpu-s)"></i><b>10h03m of CPU time</b> — and what share of one core.</span>
+      <span class="cap"><i style="background:#7c8492"></i><b>Every pid</b> that carried the name, with what each held.</span>
+      <span class="cap"><i style="background:var(--io-s)"></i><b>The incident</b> it was blamed for, with its peak and duration.</span>
+    </figcaption>
+  </div>
+</section>
+
+<!-- ================================================================ terminal -->
+<section class="band band-screen on-screen" style="padding-top:0">
+  <div class="wrap two">
+    <div>
+      <p class="eyebrow">Without a browser</p>
+      <h2>The same history, in the terminal.</h2>
+      <p class="lead" style="margin-top:18px">The database is plain SQLite, and the CLI answers the
+      questions you actually have: what has been holding memory, what burned the CPU last week, what
+      one application did all day.</p>
+      <p class="note">The raw per-sample rows stay in the file for whatever
+      <code class="mono">sqlite3</code> query you want to write yourself.</p>
+    </div>
+    <div>
+      <div class="term">
+        <div class="term-h"><b>$</b> busywatch hogs --by cpu --since 3d --top 5</div>
+<pre>top 5 by cpu over the last 3d00h <span class="d">(since 2026-08-24 19:31)</span>
+
+<span class="d">process         rss peak   rss avg   rss now  cpu time  cpu pk</span>
+<b>rustc</b>              1.1GB   610.2MB         —     <b>1d03h</b>    <span class="c">734%</span>
+<b>cargo</b>            901.8MB   325.7MB         —     <b>1d01h</b>    <span class="c">736%</span>
+<b>brave</b>             12.9GB     5.7GB     6.3GB    <b>10h03m</b>     <span class="c">87%</span>
+<b>firefox</b>            2.1GB     1.9GB     2.1GB     <b>2h39m</b>     <span class="c">32%</span>
+<b>node</b>             508.9MB   474.0MB   508.9MB     <b>2h34m</b>     <span class="c">85%</span></pre>
+      </div>
+      <div class="term">
+        <div class="term-h"><b>$</b> busywatch app brave --since 3d</div>
+<pre><b>brave</b> — last 3d00h
+
+  <span class="d">cpu time</span>   10h03m     14.0% of one core   peak 87%
+  <span class="d">rss</span>        peak <span class="m">12.9GB</span>   avg 5.7GB   now 6.3GB   (75% of ram at peak)
+  <span class="d">io</span>         read 12.0GB   written 4.0GB   peak 196.7KB/s
+  <span class="d">presence</span>   4635 samples   8 pid(s), up to 24 at once
+  <span class="d">incidents</span>  1 it was blamed for:
+               2026-08-26 21:00 [<span class="m">mem</span>] 1h28m  peak 31%</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =================================================================== specs -->
+<section class="band">
+  <div class="wrap">
+    <p class="eyebrow">What it is made of</p>
+    <h2>Small enough to forget it is running.</h2>
+    <dl class="specs">
+      <div class="spec"><dt>Dependencies</dt><dd><code class="mono">libc</code> and
+        <code class="mono">rusqlite</code>. That is the whole list.</dd></div>
+      <div class="spec"><dt>Binary</dt><dd>Under 2&nbsp;MB, stripped, LTO.</dd></div>
+      <div class="spec"><dt>While idle</dt><dd>Blocked in <code class="mono">poll()</code>. No timer,
+        no async runtime, no sampling loop.</dd></div>
+      <div class="spec"><dt>Tray &amp; toasts</dt><dd>D-Bus written by hand — a StatusNotifierItem any
+        spec-compliant tray picks up: Waybar, quickshell, KDE, GNOME with an extension.
+        No session bus means no icon and a log line, never a failure to start.</dd></div>
+      <div class="spec"><dt>Web UI</dt><dd>HTTP written by hand. Read-only, bound to loopback, and the
+        page embeds everything it needs — it works offline.</dd></div>
+      <div class="spec"><dt>History</dt><dd><code class="mono">~/.local/state/busywatch/history.db</code>
+        — SQLite you can query yourself.</dd></div>
+      <div class="spec"><dt>Retention</dt><dd>30 days, and 3 days for the bulky per-process rows.
+        Pruned automatically.</dd></div>
+      <div class="spec"><dt>Overlay window</dt><dd>Chromium in <code class="mono">--app</code> mode on a
+        <code class="mono">busywatch.localhost</code> alias, so the window carries an app_id of its own
+        for a compositor rule to catch on Wayland.</dd></div>
+    </dl>
+  </div>
+</section>
+
+<!-- ================================================================= install -->
+<section class="band band-tight" id="install">
+  <div class="wrap">
+    <p class="eyebrow">Install</p>
+    <h2>Build it, cap it, enable it.</h2>
+    <div class="install">
+      <div class="recipe">
+        <div class="recipe-h"><h3>From source</h3><span class="plate">any distro</span></div>
+<pre><span class="d"># build and install the binary</span>
+<b>cargo build --release</b>
+<b>install -m755 target/release/busywatch ~/.local/bin/busywatch</b>
+
+<span class="d"># PSI triggers need this capability</span>
+<b>sudo setcap cap_sys_resource+ep ~/.local/bin/busywatch</b>
+
+<span class="d"># the unit runs `busywatch --web`</span>
+<b>systemctl --user enable --now busywatch.service</b></pre>
+      </div>
+      <div class="recipe">
+        <div class="recipe-h"><h3>Arch package</h3><span class="plate">packaging/</span></div>
+<pre><span class="d"># builds straight from the repository</span>
+<b>cd packaging</b>
+<b>makepkg -si</b>
+
+<b>systemctl --user enable --now busywatch.service</b>
+
+<span class="d"># binary in /usr/bin, user unit in /usr/lib/systemd/user,
+# and the capability re-applied on every upgrade</span></pre>
+      </div>
+    </div>
+    <div class="warnbox"><b>Installing by hand? Repeat the <code class="mono">setcap</code>.</b>
+    Capabilities live on the inode, so a fresh copy of the binary arrives without one. Without it
+    busywatch still runs — it just reads the pressure files every ten seconds instead of being woken.</div>
+    <p class="note" style="margin-top:24px">The history UI is then at
+    <a href="http://127.0.0.1:8787/" class="mono">http://127.0.0.1:8787/</a>, or run
+    <code class="mono">busywatch web</code> on its own against the database.</p>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ================================================================== origin -->
+<section class="band band-tight">
+  <div class="wrap"><div class="origin">
+    <p class="eyebrow">Why it exists</p>
+    <blockquote>WirePlumber silently burned 2.5 CPU-hours digesting a stuck Bluetooth discovery scan.
+    <span>A warning naming the hot process would have surfaced that in minutes instead of hours.</span></blockquote>
+    <p class="note">The history and the web UI came next, for the slower version of the same problem:
+    something that grows a gigabyte an hour while you are not looking.</p>
+  </div></div>
+</section>
+
+<footer>
+  <div class="foot">
+    <span class="dot" aria-hidden="true"></span>
+    <span class="plate">busywatch</span>
+    <span class="plate">MIT licensed</span>
+    <span class="plate">Linux · PSI · SQLite</span>
+    <span class="plate">Screenshots show generated sample data</span>
+  </div>
+</footer>
+
+<script>
+(function(){
+  const psi = document.getElementById("d-psi");
+  const tape = document.getElementById("d-tape");
+  const toast = document.getElementById("d-toast");
+  const tHead = document.getElementById("t-head");
+  const tBody = document.getElementById("t-body");
+  const state = document.getElementById("d-state");
+  const dot = document.getElementById("d-dot");
+  const dot2 = document.getElementById("d-dot2");
+  const quiet = document.getElementById("d-quiet");
+  const tip = document.getElementById("d-tip");
+  const QUIET_TIP = "cpu 0.1% · mem 0.0% · io 0.0% · load 0.48";
+  const WARN_TIP  = "mem pressure — cpu 12% mem 31% io 2.4% · load 4.10 · brave";
+  if (!psi) return;
+
+  const WARN = "2.3GB of 16.0GB available (14%), memory stall avg60=31%, swap 3.4GB\ntop: <em>brave(1000) 4.0GB, brave(1001) 2.4GB, brave(1002) 1.7GB</em>";
+  const CLEAR = "mem pressure avg60=3% — was busy for 1h28m, peak 31%, now 9.1GB available — <em>brave</em>";
+
+  const f = v => v.toFixed(2);
+  function draw(a10, a60, a300, hot){
+    const c = hot ? "hot" : "";
+    psi.innerHTML =
+      'some avg10=<b class="'+c+'">'+f(a10)+'</b> avg60=<b class="'+c+'">'+f(a60)+
+      '</b> avg300=<b>'+f(a300)+'</b>\n' +
+      'full avg10=<b>'+f(a10*0.13)+'</b> avg60=<b>'+f(a60*0.13)+'</b> avg300=<b>'+f(a300*0.11)+'</b>';
+  }
+
+  // The journal, in the order the program actually writes it.
+  const lines = [
+    {t:  0, s:'<span class="k">[·]</span> psi trigger registered · some 500000 1000000'},
+    {t:  0, s:'<span class="k">[·]</span> history db: ~/.local/state/busywatch/history.db'},
+    {t:5.6, s:'<span class="k">[·]</span> woken by /proc/pressure/memory'},
+    {t:6.4, s:'<span class="warnline">[!] WARNING (new) Memory is running low</span>'},
+    {t:11.5,s:'<span class="k">[·]</span> incident open · re-checking every 10s'},
+    {t:15.2,s:'<span class="okline">[✓] all clear — was busy for 1h28m, peak 31%</span>'},
+  ];
+
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce){
+    draw(38.2, 31.4, 12.7, true);
+    tape.innerHTML = lines.slice(0,4).map(l => '<div class="on">'+l.s+'</div>').join("");
+    state.textContent = "warned · incident open"; state.style.color = "var(--mem-s)";
+    dot.classList.add("warn");
+    tHead.textContent = "Memory is running low"; tBody.innerHTML = WARN;
+    toast.classList.add("on");
+    dot2.classList.add("warn"); tip.textContent = WARN_TIP;
+    quiet.classList.add("off");
+    return;
+  }
+
+  let t0 = null, rendered = -1;
+  const CYCLE = 19;
+  function frame(now){
+    if (t0 === null) t0 = now;
+    const t = ((now - t0) / 1000) % CYCLE;
+
+    // pressure: quiet, then a climb, a plateau, and a fall back to quiet
+    let a60;
+    if (t < 5)        a60 = 0.2 + Math.sin(t*2.1)*0.15 + Math.random()*0.3;
+    else if (t < 7)   a60 = 0.5 + (t-5)/2 * 30.9;
+    else if (t < 13)  a60 = 29 + Math.sin(t*1.7)*2.4 + Math.random()*1.5;
+    else if (t < 15)  a60 = 31 - (t-13)/2 * 27;
+    else              a60 = 3.4 - (t-15)/4 * 3 + Math.random()*0.4;
+    const hot = t >= 6.4 && t < 15.2;
+    draw(Math.max(0, a60 * (1 + Math.sin(t*3.3)*0.22)), Math.max(0,a60),
+         Math.max(0, a60*0.42), hot);
+
+    const step = t < 5.6 ? 0 : t < 6.4 ? 1 : t < 11.5 ? 2 : t < 15.2 ? 3 : 4;
+    if (step !== rendered){
+      rendered = step;
+      const shown = lines.filter(l => l.t <= t);
+      tape.innerHTML = shown.map(l => '<div>'+l.s+'</div>').join("");
+      requestAnimationFrame(() => {
+        for (const d of tape.children) d.classList.add("on");
+      });
+      if (step <= 1){
+        state.textContent = "blocked in poll() · 0.0% cpu"; state.style.color = "";
+        dot.classList.remove("warn"); dot2.classList.remove("warn");
+        tip.textContent = QUIET_TIP;
+        toast.classList.remove("on", "ok"); quiet.classList.remove("off");
+      } else if (step === 2){
+        state.textContent = "avg60 31% ≥ 10% · warning"; state.style.color = "var(--mem-s)";
+        dot.classList.add("warn"); dot2.classList.add("warn");
+        tip.textContent = WARN_TIP;
+        tHead.textContent = "Memory is running low"; tBody.innerHTML = WARN;
+        toast.classList.add("on"); toast.classList.remove("ok"); quiet.classList.add("off");
+      } else if (step === 3){
+        state.textContent = "incident open · re-checking every 10s";
+      } else {
+        state.textContent = "blocked in poll() · 0.0% cpu"; state.style.color = "";
+        dot.classList.remove("warn"); dot2.classList.remove("warn");
+        tip.textContent = QUIET_TIP;
+        tHead.textContent = "Memory back to normal"; tBody.innerHTML = CLEAR;
+        toast.classList.add("on", "ok"); quiet.classList.add("off");
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
