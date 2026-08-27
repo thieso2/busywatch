@@ -208,6 +208,50 @@ fn overlay_url(url: &str) -> String {
     url.to_string()
 }
 
+/// The click, as the Omarchy shell plugin's summon payload.
+///
+/// The plugin draws this same history natively, so the fragment a browser would
+/// have carried — which resource, and how far back — becomes the JSON the
+/// plugin is opened with. Everything else about the URL is the browser's
+/// business and is dropped.
+fn shell_payload(url: &str) -> String {
+    let (mut span, mut metric) = (None, None);
+    if let Some((_, frag)) = url.split_once('#') {
+        for kv in frag.split('&') {
+            match kv.split_once('=') {
+                Some(("span", v)) => span = v.parse::<u64>().ok(),
+                Some(("metric", v)) => metric = Some(v.to_string()),
+                _ => {}
+            }
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = span {
+        parts.push(format!("\"span\":{s}"));
+    }
+    if let Some(m) = metric {
+        parts.push(format!("\"metric\":{}", json_str(&m)));
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
+/// The word the shell's summon IPC answers with when it actually opened the
+/// plugin. It reports a plugin it does not have as `unknown` on stdout and
+/// still exits 0, so the exit status alone would claim success on every machine
+/// that has Omarchy and not this plugin — the stdout is what decides.
+const SUMMONED: &str = "ok";
+
+/// Hand the click to the Omarchy shell plugin, if it is installed and enabled.
+fn summon_shell_plugin(url: &str) -> bool {
+    let Ok(out) = Command::new("omarchy-shell")
+        .args(["shell", "summon", "busywatch", &shell_payload(url)])
+        .output()
+    else {
+        return false;
+    };
+    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == SUMMONED
+}
+
 /// Open the history UI as a chromeless overlay rather than a browser tab.
 ///
 /// `--app=URL` gives a window with no tabs, address bar or menu — the page
@@ -216,6 +260,13 @@ fn overlay_url(url: &str) -> String {
 /// browser directly, then `xdg-open` (an ordinary tab, but it opens), then
 /// the terminal report. Each rung is a real fallback, not a retry.
 fn open_url(url: &str) {
+    // The shell plugin is the first rung, and it is not a fallback ladder like
+    // the rest: where it is installed the history is a window the shell owns,
+    // drawn from the same API this URL points at, and opening a browser as
+    // well would put two of the same page on screen.
+    if summon_shell_plugin(url) {
+        return;
+    }
     let url = &overlay_url(url);
     // Omarchy already launches every other web app this way, so its wrapper
     // gets first refusal: it knows which browser is default and starts it
@@ -1261,7 +1312,20 @@ mod dbus_tests {
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::overlay_url;
+    use super::{overlay_url, shell_payload};
+
+    #[test]
+    fn the_hash_becomes_the_plugins_payload() {
+        assert_eq!(
+            shell_payload("http://127.0.0.1:8787/#span=900&metric=mem"),
+            r#"{"span":900,"metric":"mem"}"#
+        );
+        // A URL with nothing to say still opens the window, on whatever range
+        // it was left on.
+        assert_eq!(shell_payload("http://127.0.0.1:8787/"), "{}");
+        // Junk in the fragment is dropped rather than forwarded.
+        assert_eq!(shell_payload("http://x/#span=abc&nope=1"), "{}");
+    }
 
     #[test]
     fn loopback_urls_get_the_alias() {

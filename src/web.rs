@@ -3,6 +3,8 @@
 //! One thread per connection, everything read-only, bound to loopback unless
 //! told otherwise.  The page itself is a single embedded HTML file that talks
 //! to `/api/*`; there are no external assets, so it works offline.
+//! The same endpoints serve the Omarchy shell plugin, which draws the page
+//! natively in QML rather than in a browser.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -127,6 +129,11 @@ impl Server {
     fn route(&self, path: &str, q: &HashMap<String, String>) -> Option<(&'static str, String)> {
         match path {
             "/" | "/index.html" => Some(("text/html; charset=utf-8", UI.to_string())),
+            // What is true now, and nothing else. The bar widget in the
+            // Omarchy plugin asks for this every few seconds; serving it
+            // `/api/overview` would sweep four hundred rows of application
+            // history to colour one dot.
+            "/api/live" => Some(("application/json", live_json())),
             "/api/overview" => Some(("application/json", self.overview(q))),
             "/api/hogs" => Some(("application/json", self.hogs_json(q))),
             "/api/proc" => Some(("application/json", self.proc_json(q))),

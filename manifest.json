@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "busywatch",
+  "name": "busywatch",
+  "version": "0.1.0",
+  "author": "Thies C. Arntzen",
+  "license": "MIT",
+  "description": "The busywatch history UI, drawn natively in the Omarchy shell: cpu/memory/io stall, load, clock, heat and power over 15m to 30d, the top apps stacked over time, and a drilldown for any one of them. Needs a busywatch daemon serving its read-only API on loopback.",
+  "kinds": ["service", "bar-widget", "panel"],
+  "entryPoints": {
+    "service": "shell/Service.qml",
+    "barWidget": "shell/BarWidget.qml",
+    "panel": "shell/App.qml"
+  },
+  "barWidget": {
+    "displayName": "busywatch",
+    "description": "A dot in the colour of whatever is stalling; the history window opens on click.",
+    "category": "System",
+    "aliases": ["busywatch", "pressure", "psi", "stall", "monitor", "load", "hogs"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "host": "127.0.0.1",
+      "port": 8787,
+      "refreshIntervalSec": 10
+    },
+    "schema": [
+      {
+        "key": "host",
+        "type": "string",
+        "label": "busywatch host",
+        "defaultValue": "127.0.0.1",
+        "description": "Where the busywatch web API is listening. The daemon binds loopback unless told otherwise."
+      },
+      {
+        "key": "port",
+        "type": "integer",
+        "label": "Port",
+        "min": 1,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 8787,
+        "description": "The port busywatch was started with (`--web [ADDR:]PORT`). The shipped systemd unit uses 8787."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Bar refresh every (seconds)",
+        "min": 2,
+        "max": 300,
+        "step": 1,
+        "defaultValue": 10,
+        "description": "How often the bar dot re-reads the live pressures. The history window polls every 15 seconds on its own while it is open."
+      }
+    ]
+  }
+}

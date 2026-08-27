@@ -192,6 +192,75 @@ back where you were.
 The server is dependency-free, read-only, and binds to loopback; the page
 embeds everything it needs, so it works offline.
 
+## In the Omarchy shell
+
+The same history, drawn by the shell itself rather than by a browser.
+`manifest.json` at the root of this repository makes it an Omarchy plugin, so
+it installs the way any other one does:
+
+```sh
+omarchy plugin add https://github.com/thieso2/busywatch.git
+omarchy bar add busywatch          # a dot in the bar, if you want one
+```
+
+It is the whole page — the seven system charts, the stacked applications, the
+rundown, the drilldown and the incident list — ported to QML and drawn on
+`QtQuick.Canvas`, in the long-running `omarchy-shell` process. There is no
+browser and no second process: opening it costs a summon rather than a
+Chromium start-up, and it is drawn in the active Omarchy theme rather than in
+its own colours.
+
+It is a **port, not an embed**. A webview cannot live in the shell at all:
+Quickshell does not link QtWebEngine, and `QtWebEngineQuick::initialize()` has
+to run before the host process builds its `QGuiApplication` — long before any
+plugin is loaded. So the page was rewritten rather than framed.
+
+The plugin is a **client of the same read-only API the browser UI uses**, over
+loopback: it needs a busywatch running with `--web`, which is what the shipped
+systemd unit does. Point it elsewhere — a different port, or another machine on
+the network — in the bar widget's settings. When nothing answers, the window
+says so across the top and keeps retrying rather than showing a stale range
+with no explanation.
+
+Two things are worth setting deliberately:
+
+* **One indicator, not two.** busywatch already registers a
+  StatusNotifierItem, which the bar's tray widget shows on its own. With the
+  plugin's bar widget in the bar as well, one program has two dots. Run the
+  daemon with `--no-tray`, or leave the widget out and keep the tray icon —
+  clicking either opens the history, the tray icon in a browser and the widget
+  in the shell.
+* **Float the window.** It is an ordinary toplevel, so a tiling compositor
+  tiles it. It maps with the app_id every Quickshell window has and a title of
+  its own, so the rule matches on both:
+
+  ```lua
+  o.window({ class = "^org\\.quickshell$", title = "^busywatch$" }, {
+    float = true,
+    center = true,
+    size = { "(monitor_w*0.8)", "(monitor_h*0.8)" },
+  })
+  ```
+
+  The class alone would catch every other window the shell puts on screen, and
+  the title alone is not worth trusting on its own.
+
+**Clicking a toast opens the plugin** where it is installed, on the resource
+that raised the warning and a range wide enough to cover the incident — the
+same three values the browser URL carried in its hash, handed over as the
+summon payload instead. busywatch asks `omarchy-shell` first and only falls
+back down the browser ladder when the answer is that no such plugin is
+enabled, so a machine without the plugin behaves exactly as before.
+
+The plugin adds one endpoint to the server: `/api/live`, the same live snapshot
+already embedded in `/api/overview`, on its own. The bar widget reads it every
+few seconds to colour its dot, and serving it `/api/overview` for that would
+sweep four hundred rows of application history to paint nine pixels. A
+busywatch older than that endpoint answers 404, and the plugin then reads the
+snapshot out of `/api/overview` instead — the dot costs more on that machine,
+and nothing else changes. The plugin and the daemon do not have to be upgraded
+together.
+
 ## Build & install
 
 ```sh
