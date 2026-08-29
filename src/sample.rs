@@ -153,6 +153,41 @@ impl BatStatus {
     }
 }
 
+/// How the attached USB-C port is being fed.  `Default` is the 5V/900mA a
+/// port gives away before anything is negotiated; the two current modes are
+/// Type-C resistor advertisement with no PD contract at all; `Pd` means a
+/// power-delivery contract was agreed, which is the only mode under which a
+/// laptop-sized charger delivers laptop-sized watts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PdMode {
+    Default,
+    Type1_5A,
+    Type3_0A,
+    Pd,
+    Unknown,
+}
+
+impl PdMode {
+    pub fn parse(s: &str) -> PdMode {
+        match s.trim() {
+            "default" => PdMode::Default,
+            "1.5A" => PdMode::Type1_5A,
+            "3.0A" => PdMode::Type3_0A,
+            "usb_power_delivery" => PdMode::Pd,
+            _ => PdMode::Unknown,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PdMode::Default => "default",
+            PdMode::Type1_5A => "1.5A",
+            PdMode::Type3_0A => "3.0A",
+            PdMode::Pd => "usb_power_delivery",
+            PdMode::Unknown => "unknown",
+        }
+    }
+}
+
 /// Mains and battery state.  Every field is optional: a desktop has no
 /// battery, a VM has no power supplies at all, and `None` must stay
 /// distinguishable from a real zero.
@@ -167,7 +202,31 @@ pub struct Power {
     /// Signed microwatts: negative while discharging, positive while
     /// charging.  The sysfs counters are unsigned magnitudes, so the sign
     /// comes from `bat_status`.
+    ///
+    /// This is what crosses the battery terminals, *not* what the charger
+    /// delivers: on mains the adapter is also feeding the running system, and
+    /// no counter here reports that half.
     pub bat_power_uw: Option<i64>,
+    /// Microwatt-hours in the battery now, and when full.  `energy_full`
+    /// shrinks as the cells age, so the pair is both a fuel gauge (with a
+    /// better resolution than the rounded whole-percent `capacity`) and, held
+    /// against `bat_energy_design_uwh`, a health figure.
+    pub bat_energy_uwh: Option<i64>,
+    pub bat_energy_full_uwh: Option<i64>,
+    /// What the pack held new.  Constant for the life of the battery, so it
+    /// is reported live rather than recorded every minute.
+    pub bat_energy_design_uwh: Option<i64>,
+    /// Terminal voltage in microvolts.  Wanted only to turn watts into the
+    /// amps a charger is actually pushing.
+    pub bat_voltage_uv: Option<i64>,
+    pub bat_cycles: Option<i64>,
+    /// The negotiated Type-C power mode of whichever port is attached.
+    pub pd_mode: Option<PdMode>,
+    /// The most the charger *says* it can supply, in microwatts — the top of
+    /// its advertised PD source capabilities.  `None` is the common case, not
+    /// an error: plenty of firmware never passes the source PDOs up to the
+    /// kernel, and then nothing on the machine knows the brick's rating.
+    pub charger_max_uw: Option<i64>,
 }
 
 impl Power {
@@ -191,9 +250,73 @@ impl Power {
                 Some(uw) if uw != 0 => s.push_str(&format!(" at {:.1}W", uw.abs() as f64 / 1e6)),
                 _ => {}
             }
+            if let Some((charging, secs)) = self.eta_secs() {
+                s.push_str(&format!(
+                    ", {} in {}",
+                    if charging { "full" } else { "empty" },
+                    fmt_eta(secs)
+                ));
+            }
             parts.push(s);
         }
+        if let Some(h) = self.health_pct() {
+            let mut s = format!("health {h:.0}%");
+            if let (Some(f), Some(d)) = (self.bat_energy_full_uwh, self.bat_energy_design_uwh) {
+                s.push_str(&format!(" ({:.1} of {:.1}Wh", f as f64 / 1e6, d as f64 / 1e6));
+                match self.bat_cycles {
+                    Some(c) => s.push_str(&format!(", {c} cycles)")),
+                    None => s.push(')'),
+                }
+            }
+            parts.push(s);
+        }
+        if let Some(uw) = self.charger_max_uw {
+            parts.push(format!("charger rated {:.0}W", uw as f64 / 1e6));
+        } else if self.pd_mode == Some(PdMode::Pd) {
+            // Worth saying even without a number: it rules out the far more
+            // common complaint, a laptop trickling off a phone charger.
+            parts.push("charger negotiated PD".to_string());
+        }
         (!parts.is_empty()).then(|| parts.join(", "))
+    }
+
+    /// Seconds until full while charging, or until empty while draining, with
+    /// a flag saying which — `None` when the battery is idle, the rate is not
+    /// reported, or the energy counters are missing.
+    ///
+    /// This is the naive projection at the current rate, and it is honest only
+    /// about the next few minutes: charging tapers hard near the top, and a
+    /// discharge estimate follows whatever the machine happens to be doing
+    /// this second.  It is a reading, not a forecast.
+    pub fn eta_secs(&self) -> Option<(bool, i64)> {
+        let uw = self.bat_power_uw?;
+        let now = self.bat_energy_uwh?;
+        if uw > 0 {
+            let full = self.bat_energy_full_uwh?;
+            let togo = full.checked_sub(now).filter(|v| *v > 0)?;
+            Some((true, (togo as i128 * 3600 / uw as i128) as i64))
+        } else if uw < 0 && now > 0 {
+            Some((false, (now as i128 * 3600 / -uw as i128) as i64))
+        } else {
+            None
+        }
+    }
+
+    /// What is left of the pack, as a percentage of what it held new.  `None`
+    /// on a battery that does not report a design capacity.
+    pub fn health_pct(&self) -> Option<f64> {
+        let (full, design) = (self.bat_energy_full_uwh?, self.bat_energy_design_uwh?);
+        (design > 0).then(|| full as f64 / design as f64 * 100.0)
+    }
+}
+
+/// "1h53m", "22m" — coarse on purpose, because the estimate behind it does not
+/// support a finer figure.
+fn fmt_eta(secs: i64) -> String {
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, secs % 3600 / 60)
+    } else {
+        format!("{}m", (secs / 60).max(1))
     }
 }
 
@@ -246,6 +369,7 @@ pub fn read_power() -> Power {
             Some("Battery") if p.bat_status.is_none() && num("present") != Some(0) => {
                 p.bat_pct = num("capacity").map(|v| v as f64);
                 p.bat_status = text("status").map(|s| BatStatus::parse(&s));
+                p.bat_voltage_uv = num("voltage_now").filter(|v| *v > 0);
                 // power_now is microwatts directly; batteries that lack it
                 // expose current and voltage instead.
                 let uw = num("power_now").or_else(|| {
@@ -255,11 +379,110 @@ pub fn read_power() -> Power {
                 p.bat_power_uw = uw.map(|w| {
                     if p.bat_status == Some(BatStatus::Discharging) { -w.abs() } else { w.abs() }
                 });
+                // Energy-reporting batteries give microwatt-hours outright;
+                // charge-reporting ones give microamp-hours, which only become
+                // comparable once multiplied by the terminal voltage.  Design
+                // voltage is the wrong multiplier for `now` but the right one
+                // for the two capacities, so each uses what it should.
+                let uah_to_uwh = |uah: i64, uv: Option<i64>| -> Option<i64> {
+                    Some((uah as i128 * uv? as i128 / 1_000_000) as i64)
+                };
+                let design_uv = num("voltage_min_design").or(p.bat_voltage_uv);
+                p.bat_energy_uwh = num("energy_now")
+                    .or_else(|| uah_to_uwh(num("charge_now")?, p.bat_voltage_uv));
+                p.bat_energy_full_uwh = num("energy_full")
+                    .or_else(|| uah_to_uwh(num("charge_full")?, design_uv));
+                p.bat_energy_design_uwh = num("energy_full_design")
+                    .or_else(|| uah_to_uwh(num("charge_full_design")?, design_uv));
+                p.bat_cycles = num("cycle_count").filter(|v| *v > 0);
+            }
+            // The USB-C source side of a laptop being charged over Type-C.
+            // `online` picks the port that is actually feeding us out of the
+            // several a machine exposes.
+            Some("USB") if num("online") == Some(1) => {
+                if let (Some(uv), Some(ua)) = (num("voltage_max"), num("current_max")) {
+                    let uw = (uv as i128 * ua as i128 / 1_000_000) as i64;
+                    if uw > 0 {
+                        p.charger_max_uw = Some(p.charger_max_uw.unwrap_or(0).max(uw));
+                    }
+                }
             }
             _ => {}
         }
     }
+    let (mode, pdo_max) = read_typec();
+    p.pd_mode = mode;
+    // The advertised PDOs beat the power-supply pair when both exist: the
+    // supply reports the contract in force, which on a half-charged laptop is
+    // often well under what the brick can do.
+    p.charger_max_uw = pdo_max.or(p.charger_max_uw);
     p
+}
+
+/// The attached port's negotiated power mode, and the biggest of the source
+/// capabilities its partner advertises, in microwatts.
+///
+/// Both come out `None` on most machines.  The advertised capabilities are a
+/// PD message the port controller has to hand up to the kernel, and firmware
+/// behind an ACPI UCSI interface frequently does not: `usb_power_delivery`
+/// then holds a `revision` and nothing else.  There is no other place on the
+/// system to learn the charger's rating, so `None` here means the question is
+/// unanswerable rather than merely unread.
+fn read_typec() -> (Option<PdMode>, Option<i64>) {
+    let (mut mode, mut max_uw) = (None, None);
+    let Ok(dir) = fs::read_dir("/sys/class/typec") else { return (mode, max_uw) };
+    let mut paths: Vec<_> = dir.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        if name.ends_with("-partner") {
+            max_uw = max_uw.max(read_source_caps(&path.join("usb_power_delivery")));
+            continue;
+        }
+        // A port's own mode only says something while a partner is attached;
+        // an empty port sits at "default" and would otherwise outvote the one
+        // holding a PD contract.
+        if !path.join(format!("{name}-partner")).exists() {
+            continue;
+        }
+        if let Some(m) = fs::read_to_string(path.join("power_operation_mode"))
+            .ok()
+            .map(|s| PdMode::parse(&s))
+        {
+            // Prefer the port that actually negotiated PD over one that did not.
+            if mode != Some(PdMode::Pd) {
+                mode = Some(m);
+            }
+        }
+    }
+    (mode, max_uw)
+}
+
+/// Walk one `usb_power_delivery` device's advertised source PDOs and return
+/// the largest, in microwatts.
+///
+/// The three PDO shapes each spell their limit differently, and the units are
+/// the ones the kernel's ABI fixes: millivolts, milliamps, milliwatts.
+fn read_source_caps(pd: &Path) -> Option<i64> {
+    let mut best: Option<i64> = None;
+    for entry in fs::read_dir(pd.join("source-capabilities")).ok()?.flatten() {
+        let dir = entry.path();
+        let mv = |f: &str| -> Option<i64> {
+            fs::read_to_string(dir.join(f)).ok()?.trim().parse::<i64>().ok()
+        };
+        // A fixed supply names its one voltage; the ranged shapes are worth
+        // only their ceiling, which is what a charger is rated at.
+        let uw = match (mv("voltage"), mv("maximum_voltage"), mv("maximum_current"), mv("maximum_power")) {
+            (_, _, _, Some(mw)) => mw.checked_mul(1000),
+            (Some(v), _, Some(i), _) => v.checked_mul(i),
+            (None, Some(v), Some(i), _) => v.checked_mul(i),
+            _ => None,
+        };
+        if let Some(uw) = uw.filter(|w| *w > 0) {
+            best = Some(best.unwrap_or(0).max(uw));
+        }
+    }
+    best
 }
 
 // --------------------------------------------------------- clock & throttle
@@ -660,6 +883,87 @@ mod tests {
         assert!(cpu_temp_rank("k10temp") > cpu_temp_rank("acpitz"));
         assert_eq!(cpu_temp_rank("nvme"), None);
         assert_eq!(cpu_temp_rank("BAT0"), None);
+    }
+
+    /// The three PDO shapes each spell their limit differently and each in a
+    /// different unit, and a wrong multiplier here turns a 65W brick into a
+    /// 65mW one without ever looking implausible enough to notice.
+    #[test]
+    fn source_capabilities_come_out_in_microwatts_whatever_shape_they_are_in() {
+        let dir = std::env::temp_dir().join(format!("bw-pdo-{}", std::process::id()));
+        let caps = dir.join("source-capabilities");
+        let write = |sub: &str, files: &[(&str, &str)]| {
+            let d = caps.join(sub);
+            fs::create_dir_all(&d).unwrap();
+            for (name, val) in files {
+                fs::write(d.join(name), val).unwrap();
+            }
+        };
+        // The 5V/3A every charger offers first, then a 20V/3.25A fixed PDO —
+        // the 65W the brick is sold as — and a battery PDO in milliwatts.
+        write("1:fixed_supply", &[("voltage", "5000"), ("maximum_current", "3000")]);
+        write("2:fixed_supply", &[("voltage", "20000"), ("maximum_current", "3250")]);
+        write("3:battery", &[("maximum_voltage", "20000"), ("minimum_voltage", "5000"),
+                             ("maximum_power", "27000")]);
+        assert_eq!(read_source_caps(&dir), Some(65_000_000));
+
+        // A range PDO has no single `voltage`, so its ceiling is the pair to
+        // multiply; 20V at 5A is the 100W a bigger charger advertises.
+        write("4:programmable_supply", &[("maximum_voltage", "20000"),
+                                         ("minimum_voltage", "3300"),
+                                         ("maximum_current", "5000")]);
+        assert_eq!(read_source_caps(&dir), Some(100_000_000));
+
+        // The common case: a device that exposes the directory and nothing in
+        // it must read as unknown, not as a zero-watt charger.
+        let empty = dir.join("empty");
+        fs::create_dir_all(empty.join("source-capabilities")).unwrap();
+        assert_eq!(read_source_caps(&empty), None);
+        // And one with no such directory at all — most machines.
+        assert_eq!(read_source_caps(&dir.join("absent")), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every one of these is a division somebody reads as a promise, and each
+    /// guard is there because the alternative is a confident wrong number.
+    #[test]
+    fn the_estimates_refuse_to_divide_by_what_they_do_not_have() {
+        let full = Power {
+            bat_status: Some(BatStatus::Charging),
+            bat_power_uw: Some(18_000_000),
+            bat_energy_uwh: Some(19_290_000),
+            bat_energy_full_uwh: Some(52_000_000),
+            bat_energy_design_uwh: Some(52_000_000),
+            ..Power::default()
+        };
+        // 32.71Wh of headroom at 18W is a little under two hours.
+        let (charging, secs) = full.eta_secs().unwrap();
+        assert!(charging);
+        assert!((6400..6700).contains(&secs), "{secs}s");
+        assert_eq!(full.health_pct().map(|h| h.round()), Some(100.0));
+
+        // Draining counts the whole pack down, not the headroom above it.
+        let draining = Power {
+            bat_status: Some(BatStatus::Discharging),
+            bat_power_uw: Some(-12_000_000),
+            ..full
+        };
+        let (charging, secs) = draining.eta_secs().unwrap();
+        assert!(!charging);
+        assert!((5700..5900).contains(&secs), "{secs}s");
+
+        // A battery sitting at a charge threshold reports zero watts; there is
+        // no rate to divide by and so no estimate to make.
+        assert_eq!(Power { bat_power_uw: Some(0), ..full }.eta_secs(), None);
+        // A full battery has no headroom left, which is not an infinite wait.
+        assert_eq!(Power { bat_energy_uwh: Some(52_000_000), ..full }.eta_secs(), None);
+        // A battery that reports no energy counters at all says nothing.
+        assert_eq!(Power { bat_energy_uwh: None, ..full }.eta_secs(), None);
+        assert_eq!(Power { bat_energy_design_uwh: None, ..full }.health_pct(), None);
+
+        // A worn pack is the whole reason the figure is worth showing.
+        let worn = Power { bat_energy_full_uwh: Some(44_200_000), ..full };
+        assert_eq!(worn.health_pct().map(|h| h.round()), Some(85.0));
     }
 
     /// Whatever the machine this runs on happens to expose, it must come back

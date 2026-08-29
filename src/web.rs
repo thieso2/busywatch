@@ -193,7 +193,9 @@ impl Server {
                     "{{\"t\":{},\"cpu\":{},\"cpuMax\":{},\"mem\":{},\"memMax\":{},\
                       \"io\":{},\"ioMax\":{},\"load\":{},\"loadMax\":{},\
                       \"memUsed\":{},\"memUsedMax\":{},\"memTotal\":{},\"swap\":{},\"n\":{},\
-                      \"ac\":{},\"bat\":{},\"batW\":{},\"freq\":{},\"freqMax\":{},\
+                      \"ac\":{},\"bat\":{},\"batW\":{},\
+                      \"batE\":{},\"batEFull\":{},\"pdMax\":{},\
+                      \"freq\":{},\"freqMax\":{},\
                       \"thr\":{},\"thrMs\":{},\
                       \"temp\":{},\"tempMax\":{},\"fan\":{},\"fanMax\":{}}}",
                     b.t,
@@ -213,6 +215,9 @@ impl Server {
                     json_opt_num(b.ac_online),
                     json_opt_num(b.bat_pct),
                     json_opt_num(b.bat_power_uw),
+                    json_opt_num(b.bat_energy_uwh),
+                    json_opt_num(b.bat_energy_full_uwh),
+                    json_opt_num(b.charger_max_uw),
                     json_opt_num(b.freq_khz),
                     json_opt_num(b.freq_max_khz),
                     opt_i64(b.throttled),
@@ -450,6 +455,8 @@ fn live_json() -> String {
           \"load\":{},\"cores\":{},\"memTotal\":{},\"memAvail\":{},\
           \"swapTotal\":{},\"swapUsed\":{},\
           \"acOnline\":{},\"batPct\":{},\"batStatus\":{},\"batPowerUw\":{},\
+          \"batEnergyUwh\":{},\"batEnergyFullUwh\":{},\"batEnergyDesignUwh\":{},\
+          \"batVoltageUv\":{},\"batCycles\":{},\"pdMode\":{},\"chargerMaxUw\":{},\
           \"cpuFreqKhz\":{},\"cpuFreqMaxKhz\":{},\"throttleCount\":{},\"throttleMs\":{},\
           \"cpuTempMc\":{},\"fanRpm\":{},\"fanMaxRpm\":{}}}",
         json_num(p.cpu.avg10),
@@ -477,6 +484,16 @@ fn live_json() -> String {
             None => "null".into(),
         },
         opt_i64(pw.bat_power_uw),
+        opt_i64(pw.bat_energy_uwh),
+        opt_i64(pw.bat_energy_full_uwh),
+        opt_i64(pw.bat_energy_design_uwh),
+        opt_i64(pw.bat_voltage_uv),
+        opt_i64(pw.bat_cycles),
+        match pw.pd_mode {
+            Some(m) => json_str(m.as_str()),
+            None => "null".into(),
+        },
+        opt_i64(pw.charger_max_uw),
         opt_i64(ck.freq_khz.map(|v| v as i64)),
         opt_i64(ck.freq_max_khz.map(|v| v as i64)),
         opt_i64(ck.throttle_count.map(|v| v as i64)),

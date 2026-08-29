@@ -131,6 +131,15 @@ h3{font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;lett
     </div>
   </section>
 
+  <section id="chgsec" hidden>
+    <div class="head">
+      <h2 id="chgTitle">Battery</h2>
+      <span class="sub" id="chgSub"></span>
+    </div>
+    <div class="tiles" id="chgTiles"></div>
+    <p class="muted" id="chgNote"></p>
+  </section>
+
   <section id="hogsec">
     <div class="head">
       <h2 id="hogTitle">Apps by memory</h2>
@@ -238,6 +247,12 @@ const pct = v => (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + "%";
 // kHz in, because that is what the kernel and the history both speak.
 const ghz = k => k >= 1e6 ? (k / 1e6).toFixed(1) + "GHz" : Math.round(k / 1000) + "MHz";
 const watts = uw => (Math.abs(uw) / 1e6).toFixed(1) + "W";
+// Microwatt-hours in. A pack is a two-figure number of watt-hours, so one
+// decimal is the whole useful range of the reading.
+const wattHours = uwh => (Math.abs(uwh) / 1e6).toFixed(1) + "Wh";
+// Two watt-hour figures that share a unit — "44.2 of 52.0Wh". Spelling it
+// twice costs a tile's width for nothing.
+const wattHoursPair = (a, b) => `${(Math.abs(a) / 1e6).toFixed(1)} of ${wattHours(b)}`;
 // Millidegrees in, because that is what hwmon and the history both speak.
 const degC = mc => (mc / 1000).toFixed(0) + "\u00b0C";
 // Fan speeds run to four figures; "5.4k" beats "5400" on a cramped axis.
@@ -693,7 +708,8 @@ function render(){
   // Independently, so a failure in one panel cannot leave the charts frozen
   // on the previous range with no sign of why.
   for (const [name, fn] of [["coverage", renderCoverage], ["gauges", () => renderGauges(d.live)],
-                            ["charts", renderSystem], ["apps", renderHogs],
+                            ["charts", renderSystem], ["charging", renderCharging],
+                            ["apps", renderHogs],
                             ["incidents", renderIncidents], ["drilldown", renderDetailCharts]]){
     try { fn(d); }
     catch (e){ console.error("busywatch: rendering " + name + " failed", e); }
@@ -754,6 +770,120 @@ function renderGauges(l){
   $("#gauges").innerHTML = gs.map(([k, v, p, c]) =>
     `<div class="g"><i>${k}</i><b>${v}</b><div class="bar"><div style="width:${Math.min(100,p).toFixed(0)}%;background:var(${c})"></div></div></div>`).join("");
   $("#host").textContent = `· ${l.cores} cores · ${bytes(l.memTotal)} ram`;
+}
+
+// ---------------------------------------------------------------- charging
+//
+// The daemon records what the kernel handed over and nothing more: microwatts
+// across the terminals, microwatt-hours in the pack, the Type-C mode the port
+// negotiated. None of that is what a person wants to read. "Full in 1h50m" is
+// a division that only makes sense at the moment of asking, so it happens
+// here — the same reason the unit helpers convert at the last moment. The
+// shell plugin carries the same maths in Charge.js; the two must agree.
+
+// How fast the pack is really filling or emptying, in microwatt-hours per
+// second, measured across the tail of the recorded history instead of read
+// off the instantaneous watts, which swings with whatever the machine is
+// doing this second. Null unless the tail is recent, unbroken and long enough
+// to divide by: a laptop that just woke has a last bucket from before it
+// slept, and the energy difference across that gap is not a rate.
+function chargeSlope(rows, d){
+  if (!d || !rows || !rows.length) return null;
+  const bucket = d.bucket || 60, want = Math.max(600, bucket * 2), pts = [];
+  for (let i = rows.length - 1; i >= 0; i--){
+    if (rows[i].batE == null) break;
+    pts.push(rows[i]);
+    if (pts[0].t - rows[i].t >= want) break;
+  }
+  if (pts.length < 2) return null;
+  const last = pts[0], first = pts[pts.length - 1];
+  if (d.now - last.t > bucket * 2 + 300) return null;
+  const dt = last.t - first.t;
+  if (dt < Math.max(120, bucket)) return null;
+  return {rate: (last.batE - first.batE) / dt, span: dt};
+}
+
+function chargeState(l, rows, d){
+  if (!l || l.batPct == null) return null;
+  const st = (l.batStatus || "").toLowerCase();
+  const uw = l.batPowerUw || 0;
+  const now = l.batEnergyUwh ?? null, full = l.batEnergyFullUwh ?? null;
+  // A battery held at a charge threshold reports zero watts and "Charging",
+  // so the status breaks the tie the sign cannot.
+  const charging = uw > 0 || (uw === 0 && st === "charging");
+  const togo = charging ? (full == null || now == null ? null : full - now) : now;
+
+  // Prefer the measured slope, but only while it agrees with which way the
+  // battery is going: a range whose tail straddles the moment the charger
+  // went in has a slope that means nothing here.
+  let eta = null, etaFrom = null;
+  const h = chargeSlope(rows, d);
+  if (h && togo != null && togo > 0 && ((charging && h.rate > 0) || (!charging && h.rate < 0))){
+    eta = togo / Math.abs(h.rate);
+    etaFrom = `measured over the last ${briefDur(h.span)}`;
+  } else if (uw !== 0 && togo != null && togo > 0){
+    eta = togo / Math.abs(uw) * 3600;
+    etaFrom = "at the rate right now";
+  }
+  const design = l.batEnergyDesignUwh ?? null;
+  return {charging, idle: uw === 0, status: st, acOnline: l.acOnline === 1,
+          pct: l.batPct, uw, uv: l.batVoltageUv ?? null, now, full, design,
+          cycles: l.batCycles ?? null,
+          health: (full != null && design) ? full / design * 100 : null,
+          etaSecs: eta, etaFrom, pdMode: l.pdMode || null,
+          chargerUw: l.chargerMaxUw ?? null};
+}
+
+// What the negotiated Type-C mode means, in words. The mode is the difference
+// between a laptop charging and a laptop losing ground on a phone charger,
+// and "3.0A" on its own does not say that to anybody.
+function pdModeText(mode){
+  return mode === "usb_power_delivery" ? "USB-C, PD contract negotiated"
+    : mode === "1.5A" ? "USB-C at 1.5A, no PD contract"
+    : mode === "3.0A" ? "USB-C at 3.0A, no PD contract"
+    : mode === "default" ? "USB-C at the default 5V, nothing negotiated"
+    : "no USB-C port reporting";
+}
+
+function renderCharging(d){
+  const c = chargeState(d.live, d.series, d);
+  $("#chgsec").hidden = !c;
+  if (!c) return;
+  $("#chgTitle").textContent = c.idle
+    ? (c.status === "full" ? "Battery full" : "Battery")
+    : (c.charging ? "Charging" : "On battery");
+  $("#chgSub").textContent =
+    `${c.pct.toFixed(0)}% · ${c.acOnline ? "adapter online" : "no adapter"}`;
+
+  const amps = (c.uv && c.uw)
+    ? `${(Math.abs(c.uw) / Math.abs(c.uv)).toFixed(2)}A at ${(c.uv / 1e6).toFixed(2)}V` : "";
+  const t = [[c.idle ? "battery power" : (c.charging ? "charging at" : "drawing"),
+              c.idle ? (c.status === "full" ? "full" : "idle") : watts(c.uw), amps]];
+  if (c.etaSecs != null)
+    t.push([c.charging ? "full in" : "empty in", dur(Math.round(c.etaSecs)), c.etaFrom]);
+  if (c.now != null && c.full != null)
+    t.push(["in the pack", wattHours(c.now), `of ${wattHours(c.full)} full`]);
+  if (c.health != null)
+    t.push(["battery health", `${c.health.toFixed(0)}%`,
+            `${wattHoursPair(c.full, c.design)} new`
+              + (c.cycles != null ? ` · ${c.cycles} cycles` : "")]);
+  // Shown even empty-handed on purpose: "we cannot tell" is the answer people
+  // come looking for, and a missing tile reads as an oversight instead.
+  t.push(["charger", c.chargerUw != null ? watts(c.chargerUw) : "not reported",
+          pdModeText(c.pdMode)]);
+  $("#chgTiles").innerHTML = t.map(([k, v, sub]) =>
+    `<div class="tile"><i>${k}</i><b>${v}</b><small>${sub || "&nbsp;"}</small></div>`).join("");
+
+  // Two things the numbers cannot say for themselves, and both of them are
+  // what somebody would otherwise misread.
+  const notes = ["Watts are measured at the battery terminals. On the adapter "
+    + "the charger is also feeding the running system, and nothing on this "
+    + "machine reports that half."];
+  if (c.chargerUw == null)
+    notes.push("The charger's rating is what it advertises in its PD source "
+      + "capabilities. This machine's firmware does not pass those to the "
+      + "kernel, so no program here can know it.");
+  $("#chgNote").textContent = notes.join(" ");
 }
 
 function renderSystem(d){
@@ -868,7 +998,8 @@ function renderSystem(d){
       ${r.thr ? `<tr><td>throttled</td><td>${r.thr}\u00d7${r.thrMs ? ` · ${(r.thrMs/1000).toFixed(1)}s` : ""}</td></tr>` : ""}
       ${r.temp == null ? "" : `<tr><td>cpu temp</td><td>${degC(r.temp)}${r.tempMax > r.temp ? ` <span class="muted">peak ${degC(r.tempMax)}</span>` : ""}</td></tr>`}
       ${r.fan == null ? "" : `<tr><td>fan</td><td>${r.fan ? `${Math.round(r.fan)} rpm` : "off"}${r.fanMax > r.fan ? ` <span class="muted">peak ${Math.round(r.fanMax)} rpm</span>` : ""}</td></tr>`}
-      ${r.bat == null ? "" : `<tr><td>battery</td><td>${r.bat.toFixed(0)}%${r.batW ? ` <span class="muted">${r.batW < 0 ? "\u2193" : "\u2191"}${watts(r.batW)}</span>` : ""}</td></tr>`}
+      ${r.bat == null ? "" : `<tr><td>battery</td><td>${r.bat.toFixed(0)}%${r.batW ? ` <span class="muted">${r.batW < 0 ? "\u2193" : "\u2191"}${watts(r.batW)}</span>` : ""}${r.batE == null ? "" : ` <span class="muted">${wattHours(r.batE)}${r.batEFull ? ` of ${wattHours(r.batEFull)}` : ""}</span>`}</td></tr>`}
+      ${r.pdMax == null ? "" : `<tr><td>charger</td><td>${watts(r.pdMax)} <span class="muted">rated</span></td></tr>`}
       ${r.ac == null ? "" : `<tr><td>power</td><td>${r.ac >= 0.5 ? "on AC" : "on battery"}${r.ac > 0 && r.ac < 1 ? ` <span class="muted">(changed in this bucket)</span>` : ""}</td></tr>`}
       </table>`};
   };

@@ -27,6 +27,28 @@ function ghz(k) {
 
 function watts(uw) { return (Math.abs(uw) / 1e6).toFixed(1) + "W" }
 
+// Microwatt-hours in, because that is what the battery counters and the
+// history both speak. A pack is a two-figure number of watt-hours, so one
+// decimal is the whole useful range of the reading.
+function wattHours(uwh) { return (Math.abs(uwh) / 1e6).toFixed(1) + "Wh" }
+
+// Two watt-hour figures that share a unit — "44.2 of 52.0Wh". Spelling the
+// unit twice costs a tile's width for nothing, and the sub-line under a tile
+// is where the room runs out first.
+function wattHoursPair(a, b) {
+  return (Math.abs(a) / 1e6).toFixed(1) + " of " + wattHours(b)
+}
+
+// Watts and volts, both as the kernel's micro-units, out as the current the
+// charger is actually pushing. Amps are what a charger is argued about in.
+function amps(uw, uv) {
+  if (!uv) return null
+  return (Math.abs(uw) / Math.abs(uv)).toFixed(2) + "A"
+}
+
+// Microvolts in.
+function volts(uv) { return (uv / 1e6).toFixed(2) + "V" }
+
 // Millidegrees in, because that is what hwmon and the history both speak.
 function degC(mc) { return (mc / 1000).toFixed(0) + "°C" }
 

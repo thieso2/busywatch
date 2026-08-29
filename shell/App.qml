@@ -6,6 +6,7 @@ import qs.Commons
 import qs.Ui
 import "Axis.js" as Axis
 import "Format.js" as Fmt
+import "Charge.js" as Charge
 
 // The history window: the browser page, drawn by the shell.
 //
@@ -250,7 +251,11 @@ Item {
         + (r.fanMax > r.fan ? "  peak " + Math.round(r.fanMax) + " rpm" : "") })
     if (r.bat !== null && r.bat !== undefined)
       out.push({ k: "battery", v: r.bat.toFixed(0) + "%"
-        + (r.batW ? "  " + (r.batW < 0 ? "↓" : "↑") + Fmt.watts(r.batW) : "") })
+        + (r.batW ? "  " + (r.batW < 0 ? "↓" : "↑") + Fmt.watts(r.batW) : "")
+        + (r.batE !== null && r.batE !== undefined ? "  " + Fmt.wattHours(r.batE)
+            + (r.batEFull ? " of " + Fmt.wattHours(r.batEFull) : "") : "") })
+    if (r.pdMax !== null && r.pdMax !== undefined)
+      out.push({ k: "charger", v: Fmt.watts(r.pdMax) + " rated" })
     if (r.ac !== null && r.ac !== undefined)
       out.push({ k: "power", v: (r.ac >= 0.5 ? "on AC" : "on battery")
         + (r.ac > 0 && r.ac < 1 ? " (changed in this bucket)" : "") })
@@ -367,6 +372,12 @@ Item {
     }
     return g
   }
+
+  // ---------------------------------------------------------------- charging
+  // The maths lives in Charge.js so it can be tested without a running daemon;
+  // what is left here is only the binding that re-runs it when the live block
+  // or the history changes.
+  readonly property var charge: Charge.state(root.live, root.rows, root.overview)
 
   // How far back the history actually goes, and which range buttons can show
   // anything at all — a 30d button over 8h of history looks like a dead button.
@@ -783,6 +794,14 @@ Item {
                 color: pal.dim
               }
             }
+          }
+
+          // ====================================================== charging
+          ChargePanel {
+            colors: pal
+            charge: root.charge
+            Layout.leftMargin: Style.space(16)
+            Layout.rightMargin: Style.space(16)
           }
 
           // ========================================================== apps

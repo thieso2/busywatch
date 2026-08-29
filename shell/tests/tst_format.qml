@@ -38,6 +38,29 @@ TestCase {
     compare(Fmt.watts(43300000), "43.3W")
   }
 
+  function test_watt_hours_are_the_pack_not_the_rate() {
+    // A 52Wh pack reads 52000000 in the kernel's microwatt-hours; getting this
+    // divisor wrong turns a full battery into an implausible 52kWh one.
+    compare(Fmt.wattHours(52000000), "52.0Wh")
+    compare(Fmt.wattHours(19290000), "19.3Wh")
+    // The pair spells the unit once, at the end, where both figures share it.
+    compare(Fmt.wattHoursPair(44200000, 52000000), "44.2 of 52.0Wh")
+  }
+
+  function test_amps_divide_two_micro_units_into_a_plain_one() {
+    // 18.0W at 11.82V is 1.52A. Both inputs are micro-scaled, so the scale
+    // cancels and the answer must come out in whole amps.
+    compare(Fmt.amps(18000000, 11821000), "1.52A")
+    compare(Fmt.amps(-18000000, 11821000), "1.52A")
+    // No voltage reported means no honest current, not a division by zero.
+    compare(Fmt.amps(18000000, 0), null)
+    compare(Fmt.amps(18000000, null), null)
+  }
+
+  function test_volts_come_in_as_microvolts() {
+    compare(Fmt.volts(11821000), "11.82V")
+  }
+
   function test_temperature_comes_in_as_millidegrees() {
     compare(Fmt.degC(46000), "46°C")
   }

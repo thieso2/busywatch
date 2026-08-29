@@ -100,7 +100,9 @@ busywatch records into an SQLite database at
 
 * a **heartbeat sample every `--sample-secs`** (default 60 s) — all three
   pressures, load, memory and swap; **power** (mains online, battery percent,
-  charge/discharge state and the signed watts flowing) and **clock** (mean and
+  charge/discharge state, the signed watts flowing, the watt-hours in the pack
+  and its full mark, the negotiated USB-C mode and the charger's advertised
+  ceiling where the firmware reports one) and **clock** (mean and
   maximum CPU frequency, and the kernel's cumulative throttle counters); a row
   **per application** (every process
   summed by command name, so a browser's 20 renderers are one row); and rows
@@ -181,6 +183,30 @@ and the **watts** flowing through the battery — draw and charge drawn apart,
 so a laptop that suddenly runs the fan and the battery down at once shows both
 in one glance. The temperature axis is fixed at 100 °C rather than scaled to
 the range, so the height of the line means the same thing every time you look.
+
+On a machine with a battery the charts are followed by a **charging card**:
+what is crossing the terminals right now in watts, amps and volts; **when it
+will be full** (or empty), measured from the slope of the recorded history
+rather than from the instantaneous reading, which one compile starting is
+enough to halve; how much is in the pack; the **battery's health**, its
+remaining capacity against what it held new, with the cycle count; and what is
+known about the **charger**.
+
+Two things that card is careful to say out loud, because both are easy to
+misread:
+
+* the watts are measured **at the battery terminals**, not at the wall. On the
+  adapter the charger is also feeding the running system, and no counter on a
+  typical laptop reports that half — so 18 W into a battery does not mean an
+  18 W charger.
+* the **charger's rating** is whatever it advertises in its PD source
+  capabilities (`/sys/class/usb_power_delivery/*/source-capabilities`). Plenty
+  of firmware — anything behind an ACPI UCSI interface, which is most Intel
+  laptops — never passes those to the kernel, and then the directory holds a
+  revision and nothing else. busywatch reads it where it exists and says **"not
+  reported"** where it does not, rather than inventing a figure. The negotiated
+  Type-C mode is shown either way, and that alone separates a laptop on a real
+  PD contract from one losing ground on a phone charger.
 
 Time is not drawn to scale where nothing was recorded. A stretch with no
 samples — asleep, powered off, or busywatch not running — **collapses to a

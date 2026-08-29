@@ -210,10 +210,11 @@ impl Db {
                                  mem_avg10, mem_avg60, io_avg10, io_avg60,
                                  mem_total_kb, mem_avail_kb, swap_total_kb, swap_used_kb,
                                  ac_online, bat_pct, bat_status, bat_power_uw,
+                                 bat_energy_uwh, bat_energy_full_uwh, pd_mode, charger_max_uw,
                                  cpu_freq_khz, cpu_freq_max_khz, throttle_count, throttle_ms,
                                  cpu_temp_mc, fan_rpm)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
-                     ?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+                     ?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
             params![
                 incident_id,
                 ts,
@@ -232,6 +233,10 @@ impl Db {
                 r.power.bat_pct,
                 r.power.bat_status.map(|s| s.as_str()),
                 r.power.bat_power_uw,
+                r.power.bat_energy_uwh,
+                r.power.bat_energy_full_uwh,
+                r.power.pd_mode.map(|m| m.as_str()),
+                r.power.charger_max_uw,
                 r.clock.freq_khz.map(|v| v as i64),
                 r.clock.freq_max_khz.map(|v| v as i64),
                 r.clock.throttle_count.map(|v| v as i64),
@@ -326,6 +331,14 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              -- while discharging).  NULL throughout on a machine with no
              -- battery or no power supplies at all.
              ac_online INTEGER, bat_pct REAL, bat_status TEXT, bat_power_uw INTEGER,
+             -- Charging detail: microwatt-hours in the pack and when full (a
+             -- finer fuel gauge than the whole-percent bat_pct, and the pair a
+             -- time-to-full is computed from), the negotiated Type-C mode, and
+             -- the charger's advertised ceiling in microwatts.  charger_max_uw
+             -- is NULL on the many machines whose firmware never hands the PD
+             -- source capabilities to the kernel.
+             bat_energy_uwh INTEGER, bat_energy_full_uwh INTEGER,
+             pd_mode TEXT, charger_max_uw INTEGER,
              -- Clock: freq_* are means across CPUs in kHz; throttle_* are
              -- cumulative since boot, so take deltas between samples.
              cpu_freq_khz INTEGER, cpu_freq_max_khz INTEGER,
@@ -381,6 +394,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             ("bat_pct", "REAL"),
             ("bat_status", "TEXT"),
             ("bat_power_uw", "INTEGER"),
+            ("bat_energy_uwh", "INTEGER"),
+            ("bat_energy_full_uwh", "INTEGER"),
+            ("pd_mode", "TEXT"),
+            ("charger_max_uw", "INTEGER"),
             ("cpu_freq_khz", "INTEGER"),
             ("cpu_freq_max_khz", "INTEGER"),
             ("throttle_count", "INTEGER"),
@@ -507,6 +524,15 @@ pub struct Bucket {
     pub ac_online: Option<f64>,
     pub bat_pct: Option<f64>,
     pub bat_power_uw: Option<f64>,
+    /// Energy in the pack and its full mark, averaged over the bucket.  Two
+    /// buckets of these give a charge rate that survives a laptop the sampler
+    /// was asleep through, which the instantaneous watts do not.
+    pub bat_energy_uwh: Option<f64>,
+    pub bat_energy_full_uwh: Option<f64>,
+    /// The best charger seen in the bucket, in microwatts — MAX rather than
+    /// AVG so a bucket spanning a replug reports the good adapter rather than
+    /// an average of one and none.
+    pub charger_max_uw: Option<f64>,
     pub freq_khz: Option<f64>,
     pub freq_max_khz: Option<f64>,
     /// Throttle events *within* this bucket: the counters are cumulative, so
@@ -531,6 +557,7 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
                 AVG(mem_total_kb), AVG(mem_avail_kb), MIN(mem_avail_kb),
                 MAX(COALESCE(swap_used_kb,0)), COUNT(*),
                 AVG(ac_online), AVG(bat_pct), AVG(bat_power_uw),
+                AVG(bat_energy_uwh), AVG(bat_energy_full_uwh), MAX(charger_max_uw),
                 AVG(cpu_freq_khz), AVG(cpu_freq_max_khz),
                 MAX(throttle_count) - MIN(throttle_count),
                 MAX(throttle_ms) - MIN(throttle_ms),
@@ -566,14 +593,17 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
             ac_online: r.get(14)?,
             bat_pct: r.get(15)?,
             bat_power_uw: r.get(16)?,
-            freq_khz: r.get(17)?,
-            freq_max_khz: r.get(18)?,
-            throttled: r.get::<_, Option<i64>>(19)?.filter(|v| *v >= 0),
-            throttled_ms: r.get::<_, Option<i64>>(20)?.filter(|v| *v >= 0),
-            cpu_temp_mc: r.get(21)?,
-            cpu_temp_max_mc: r.get(22)?,
-            fan_rpm: r.get(23)?,
-            fan_max_rpm: r.get(24)?,
+            bat_energy_uwh: r.get(17)?,
+            bat_energy_full_uwh: r.get(18)?,
+            charger_max_uw: r.get(19)?,
+            freq_khz: r.get(20)?,
+            freq_max_khz: r.get(21)?,
+            throttled: r.get::<_, Option<i64>>(22)?.filter(|v| *v >= 0),
+            throttled_ms: r.get::<_, Option<i64>>(23)?.filter(|v| *v >= 0),
+            cpu_temp_mc: r.get(24)?,
+            cpu_temp_max_mc: r.get(25)?,
+            fan_rpm: r.get(26)?,
+            fan_max_rpm: r.get(27)?,
         })
     })?;
     rows.collect()
