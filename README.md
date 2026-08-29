@@ -13,6 +13,10 @@ omarchy plugin add https://github.com/thieso2/busywatch.git
 
 ![the history, drawn by the Omarchy shell](preview.png)
 
+There is a page for it at <https://busywatch.jot.moyn.dev/>, for anyone still
+deciding whether to read this far: the same story told in screenshots of the
+real UI. It is built from `site/` in this repository.
+
 Instead of polling, busywatch registers **PSI triggers** with the kernel
 (`/proc/pressure/{cpu,memory,io}`) and sleeps in `poll()` until the kernel
 itself reports that tasks were stalled beyond a threshold.
@@ -330,8 +334,18 @@ SQLite that rusqlite compiles from C would reach the Rust link step as bitcode
 it cannot resolve. Rust-side LTO still happens — it is set in the release
 profile in `Cargo.toml`.
 
-To publish it on the AUR, push this PKGBUILD plus a generated `.SRCINFO`
-(`makepkg --printsrcinfo > .SRCINFO`) to `ssh://aur@aur.archlinux.org/busywatch-git.git`.
+`packaging/.SRCINFO` sits next to the PKGBUILD because the AUR reads that
+instead of executing it. Regenerate it whenever the PKGBUILD changes, and push
+both files to `ssh://aur@aur.archlinux.org/busywatch-git.git`:
+
+```sh
+makepkg --printsrcinfo > .SRCINFO
+```
+
+The `pkgver` in either file is only a snapshot of the commit it was written
+from — `makepkg` recomputes the real one from `git rev-list` on every build —
+so a stale value there breaks nothing, but it is worth refreshing before you
+publish.
 
 ## Options
 
