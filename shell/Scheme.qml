@@ -30,6 +30,10 @@ QtObject {
   readonly property color chg:  dark ? "#4cc38a" : "#2f9e6e"
   readonly property color temp: dark ? "#ff8fab" : "#b83b5e"
   readonly property color fan:  dark ? "#4fc3d9" : "#1f7a8c"
+  readonly property color gpu:  dark ? "#7fb0ff" : "#3b6fb8"
+  readonly property color busy: dark ? "#e0b070" : "#8a5a1f"
+  readonly property color bl:   dark ? "#8a8f99" : "#9a9aa3"
+  readonly property color drm:  dark ? "#ff4f8b" : "#d4145a"
 
   // The stack chart's series colours, in order. Eight, because that is how many
   // apps the server charts, and they have to stay apart at 14% opacity when one

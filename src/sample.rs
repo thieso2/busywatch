@@ -649,6 +649,259 @@ pub fn read_thermal() -> Thermal {
     t
 }
 
+// --------------------------------------------------------------------- gpu
+
+/// What the graphics side of the machine is doing: how much power it draws,
+/// how often its engines are awake, how fast they clock, and how bright the
+/// panel is lit.
+///
+/// Watts and busy shares are rates, so they come from a [`GpuMeter`] that
+/// remembers the previous reading; a single read has nothing to divide by.
+/// Everything is optional: the RAPL energy counters are root-only unless a
+/// udev rule opens them up, AMD has no "uncore" domain at all, and a desktop
+/// has no backlight.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Gpu {
+    /// Mean graphics power since the previous reading, in milliwatts, off the
+    /// RAPL "uncore" domain — which on Intel client parts is the GPU.
+    pub gpu_mw: Option<i64>,
+    /// Mean package power over the same stretch, so the GPU's share of the
+    /// whole chip can be read off the same chart.
+    pub pkg_mw: Option<i64>,
+    /// Share of the stretch the render engine was awake (out of RC6), 0–100.
+    pub render_busy_pct: Option<f64>,
+    /// The same for the media engine, which does video decode and encode.
+    pub media_busy_pct: Option<f64>,
+    /// The render engine's actual clock at the moment of reading, MHz; 0
+    /// while it sleeps.
+    pub freq_mhz: Option<u64>,
+    /// Panel backlight as a share of its maximum; 0 with the panel dark.
+    pub backlight_pct: Option<f64>,
+}
+
+impl Gpu {
+    pub fn summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(mw) = self.gpu_mw {
+            let pkg = self.pkg_mw.map(|p| format!(" of {:.1}W package", p as f64 / 1000.0));
+            parts.push(format!("{:.2}W{}", mw as f64 / 1000.0, pkg.unwrap_or_default()));
+        }
+        if let Some(b) = self.render_busy_pct {
+            parts.push(format!("render busy {b:.0}%"));
+        }
+        if let Some(b) = self.media_busy_pct {
+            parts.push(format!("media busy {b:.0}%"));
+        }
+        if let Some(f) = self.freq_mhz {
+            parts.push(if f == 0 { "clock idle".into() } else { format!("{f} MHz") });
+        }
+        if let Some(b) = self.backlight_pct {
+            parts.push(format!("backlight {b:.0}%"));
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+}
+
+/// Where the counters live on this machine, found once: the paths do not
+/// move while the machine is up, and walking sysfs every minute to find them
+/// again would cost more than the reads.
+#[derive(Default, Debug)]
+struct GpuPaths {
+    /// (energy_uj, max_energy_range_uj) for the uncore and package domains.
+    gpu_energy: Option<(std::path::PathBuf, u64)>,
+    pkg_energy: Option<(std::path::PathBuf, u64)>,
+    /// Cumulative milliseconds asleep, per engine.
+    render_idle: Option<std::path::PathBuf>,
+    media_idle: Option<std::path::PathBuf>,
+    freq: Option<std::path::PathBuf>,
+    backlight: Option<(std::path::PathBuf, u64)>,
+}
+
+fn read_u64(p: &Path) -> Option<u64> {
+    fs::read_to_string(p).ok()?.trim().parse().ok()
+}
+
+fn trimmed(p: &Path) -> String {
+    fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+fn sorted_dir(dir: &str) -> Vec<std::path::PathBuf> {
+    let mut v: Vec<_> = fs::read_dir(dir)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+impl GpuPaths {
+    fn discover() -> GpuPaths {
+        let mut g = GpuPaths::default();
+        // RAPL: the MSR-backed tree, not intel-rapl-mmio, which carries only
+        // the package again.  A counter this user cannot read is left out
+        // here, so the missing figure reads as "not permitted", not as 0 W.
+        for zone in sorted_dir("/sys/class/powercap") {
+            let fname = zone.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !fname.starts_with("intel-rapl:") {
+                continue;
+            }
+            let energy = zone.join("energy_uj");
+            if fs::read_to_string(&energy).is_err() {
+                continue;
+            }
+            let range = read_u64(&zone.join("max_energy_range_uj")).unwrap_or(0);
+            match trimmed(&zone.join("name")).as_str() {
+                "uncore" if g.gpu_energy.is_none() => g.gpu_energy = Some((energy, range)),
+                "package-0" if g.pkg_energy.is_none() => g.pkg_energy = Some((energy, range)),
+                _ => {}
+            }
+        }
+        // xe: tile*/gt*/gtidle, named "gt0-rc" for render and "gt1-mc" for
+        // media.  i915 keeps one rc6 counter per gt under card*/gt instead.
+        for card in sorted_dir("/sys/class/drm") {
+            let cname = card.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !cname.starts_with("card") || cname.contains('-') {
+                continue;
+            }
+            let dev = card.join("device");
+            for tile in sorted_dir(&dev.to_string_lossy()) {
+                if !tile.file_name().is_some_and(|n| n.to_string_lossy().starts_with("tile")) {
+                    continue;
+                }
+                for gt in sorted_dir(&tile.to_string_lossy()) {
+                    let name = trimmed(&gt.join("gtidle/name"));
+                    let idle = gt.join("gtidle/idle_residency_ms");
+                    if name.ends_with("-rc") && g.render_idle.is_none() {
+                        g.render_idle = Some(idle);
+                        g.freq = Some(gt.join("freq0/act_freq"));
+                    } else if name.ends_with("-mc") && g.media_idle.is_none() {
+                        g.media_idle = Some(idle);
+                    }
+                }
+            }
+            let i915 = card.join("gt/gt0/rc6_residency_ms");
+            if g.render_idle.is_none() && i915.exists() {
+                g.render_idle = Some(i915);
+                g.freq = Some(card.join("gt/gt0/rps_act_freq_mhz"));
+                let media = card.join("gt/gt1/rc6_residency_ms");
+                g.media_idle = media.exists().then_some(media);
+            }
+        }
+        // The first backlight is the panel's; an external monitor's DDC
+        // backlight, where one shows up, comes after it.
+        if let Some(bl) = sorted_dir("/sys/class/backlight").into_iter().next() {
+            if let Some(max) = read_u64(&bl.join("max_brightness")).filter(|m| *m > 0) {
+                g.backlight = Some((bl.join("actual_brightness"), max));
+            }
+        }
+        g
+    }
+}
+
+/// The cumulative counters behind one [`Gpu`] reading.
+#[derive(Clone, Copy, Debug)]
+struct GpuCounters {
+    at: Instant,
+    gpu_uj: Option<u64>,
+    pkg_uj: Option<u64>,
+    render_idle_ms: Option<u64>,
+    media_idle_ms: Option<u64>,
+}
+
+/// Turns the cumulative counters into rates between successive reads.
+///
+/// Each consumer keeps its own meter — the watcher for the history, the web
+/// server for the live figures — so neither shortens the other's window.
+#[derive(Default)]
+pub struct GpuMeter {
+    paths: Option<GpuPaths>,
+    prev: Option<GpuCounters>,
+}
+
+/// The increase of a counter that wraps at `range`, or None when it went
+/// backwards by more than a wrap explains (a resume that reset it).
+fn counter_delta(prev: u64, now: u64, range: u64) -> Option<u64> {
+    if now >= prev {
+        Some(now - prev)
+    } else if range > prev {
+        Some(range - prev + now)
+    } else {
+        None
+    }
+}
+
+/// Share of `wall_ms` an engine was *not* asleep, clamped: the idle counter
+/// and the wall clock are read a few microseconds apart, which can put the
+/// raw figure a hair outside 0–100.
+fn busy_pct(idle_prev: u64, idle_now: u64, wall_ms: f64) -> Option<f64> {
+    if idle_now < idle_prev || wall_ms <= 0.0 {
+        return None;
+    }
+    Some((100.0 - (idle_now - idle_prev) as f64 / wall_ms * 100.0).clamp(0.0, 100.0))
+}
+
+fn gpu_counters(p: &GpuPaths) -> GpuCounters {
+    GpuCounters {
+        at: Instant::now(),
+        gpu_uj: p.gpu_energy.as_ref().and_then(|(f, _)| read_u64(f)),
+        pkg_uj: p.pkg_energy.as_ref().and_then(|(f, _)| read_u64(f)),
+        render_idle_ms: p.render_idle.as_deref().and_then(read_u64),
+        media_idle_ms: p.media_idle.as_deref().and_then(read_u64),
+    }
+}
+
+impl GpuMeter {
+    /// Rates since the previous call; the first call only primes the meter
+    /// and reports the instantaneous figures (clock, backlight).
+    pub fn read(&mut self) -> Gpu {
+        let p = self.paths.get_or_insert_with(GpuPaths::discover);
+        let now = gpu_counters(p);
+        let mut g = Gpu {
+            freq_mhz: p.freq.as_deref().and_then(read_u64),
+            backlight_pct: p
+                .backlight
+                .as_ref()
+                .and_then(|(f, max)| read_u64(f).map(|b| b as f64 / *max as f64 * 100.0)),
+            ..Gpu::default()
+        };
+        if let Some(prev) = self.prev {
+            let secs = now.at.duration_since(prev.at).as_secs_f64();
+            if secs > 0.05 {
+                let mw = |a: Option<u64>, b: Option<u64>, range: u64| {
+                    counter_delta(a?, b?, range).map(|uj| (uj as f64 / secs / 1000.0).round() as i64)
+                };
+                let range = |e: &Option<(std::path::PathBuf, u64)>| e.as_ref().map_or(0, |(_, r)| *r);
+                g.gpu_mw = mw(prev.gpu_uj, now.gpu_uj, range(&p.gpu_energy));
+                g.pkg_mw = mw(prev.pkg_uj, now.pkg_uj, range(&p.pkg_energy));
+                let wall_ms = secs * 1000.0;
+                g.render_busy_pct = prev
+                    .render_idle_ms
+                    .zip(now.render_idle_ms)
+                    .and_then(|(a, b)| busy_pct(a, b, wall_ms));
+                g.media_busy_pct = prev
+                    .media_idle_ms
+                    .zip(now.media_idle_ms)
+                    .and_then(|(a, b)| busy_pct(a, b, wall_ms));
+            }
+        }
+        self.prev = Some(now);
+        g
+    }
+
+    /// A reading that covers at least `min` — for callers that read rarely
+    /// or for the first time, and would otherwise get no rates at all or
+    /// ones averaged over a stale hour.
+    pub fn read_fresh(&mut self, min: Duration, max_age: Duration) -> Gpu {
+        let stale = self.prev.map_or(true, |p| p.at.elapsed() > max_age);
+        if stale {
+            self.read();
+            std::thread::sleep(min);
+        } else if let Some(left) = self.prev.map(|p| min.saturating_sub(p.at.elapsed())) {
+            std::thread::sleep(left);
+        }
+        self.read()
+    }
+}
+
 // ---------------------------------------------------------------- sweeping
 
 pub struct ProcSnap {
@@ -981,6 +1234,36 @@ mod tests {
         // A machine with neither says nothing at all rather than "0°C, fan off".
         if t.cpu_temp_mc.is_none() && t.fan_rpm.is_none() {
             assert_eq!(t.summary(), None);
+        }
+    }
+
+    /// RAPL energy counters wrap at max_energy_range_uj; a wrap is energy
+    /// used, a counter reset (resume) is not a negative watt figure.
+    #[test]
+    fn energy_counters_survive_a_wrap() {
+        assert_eq!(counter_delta(100, 250, 1000), Some(150));
+        assert_eq!(counter_delta(900, 50, 1000), Some(150));
+        assert_eq!(counter_delta(900, 50, 0), None);
+    }
+
+    #[test]
+    fn busy_share_is_the_complement_of_idle() {
+        assert_eq!(busy_pct(1000, 1750, 1000.0), Some(25.0));
+        // Counter and clock read microseconds apart can overshoot a hair.
+        assert_eq!(busy_pct(1000, 2003, 1000.0), Some(0.0));
+        assert_eq!(busy_pct(2000, 1000, 1000.0), None);
+    }
+
+    /// Whatever the GPU exposes must come back absent or plausible.
+    #[test]
+    fn reads_the_gpu_or_says_nothing() {
+        let mut m = GpuMeter::default();
+        let g = m.read_fresh(Duration::from_millis(100), Duration::ZERO);
+        for b in [g.render_busy_pct, g.media_busy_pct, g.backlight_pct].into_iter().flatten() {
+            assert!((0.0..=100.0).contains(&b), "implausible share {b}");
+        }
+        if let Some(mw) = g.gpu_mw {
+            assert!((0..200_000).contains(&mw), "implausible gpu power {mw} mW");
         }
     }
 }

@@ -24,6 +24,7 @@
 mod dbus;
 mod tray;
 mod db;
+mod drm;
 mod sample;
 mod util;
 mod web;
@@ -63,6 +64,7 @@ struct Config {
     db: Option<PathBuf>,    // history database (None = disabled)
     web: Option<String>,    // serve the UI on this address while watching
     tray: bool,             // show a StatusNotifierItem tray icon
+    drm: bool,              // follow the kernel journal for display-driver errors
 }
 
 impl Default for Config {
@@ -82,6 +84,7 @@ impl Default for Config {
             db: Some(default_db_path()),
             web: None,
             tray: true,
+            drm: true,
         }
     }
 }
@@ -101,7 +104,7 @@ fn usage() -> ! {
          \x20                [--mem-sustained PCT] [--io-sustained PCT] [--mem-free-pct PCT]\n\
          \x20                [--cooldown SECS] [--top N] [--poll-secs N] [--sample-secs N]\n\
          \x20                [--retain-days N] [--retain-pid-days N] [--web [ADDR:]PORT]\n\
-         \x20                [--no-notify] [--no-tray]\n\
+         \x20                [--no-notify] [--no-tray] [--no-drm]\n\
          \x20                [--db PATH] [--no-db]\n\
          \x20      busywatch history [N] [--db PATH]      recent busy incidents\n\
          \x20      busywatch hogs [--by mem|cpu|io] [--since 24h] [--top N]\n\
@@ -153,6 +156,7 @@ fn parse_args(args: Vec<String>) -> Config {
             }
             "--no-notify" => cfg.notify = false,
             "--no-tray" => cfg.tray = false,
+            "--no-drm" => cfg.drm = false,
             "--db" => cfg.db = Some(PathBuf::from(val(&mut args))),
             "--no-db" => cfg.db = None,
             "-h" | "--help" => usage(),
@@ -328,9 +332,33 @@ fn open_detail_window() {
         .status();
 }
 
-/// Toast ids per Kind, so each resource replaces its own previous toast
-/// instead of stacking (or erasing another resource's warning).
-static TOAST_ID: [std::sync::atomic::AtomicU32; 3] = [
+/// Which toast a notification replaces: one per pressure resource, and one
+/// for the display driver, so no warning silently erases another.
+#[derive(Clone, Copy)]
+enum Toast {
+    Pressure(Kind),
+    Display,
+}
+
+impl Toast {
+    fn slot(self) -> usize {
+        match self {
+            Toast::Pressure(k) => k.idx(),
+            Toast::Display => 3,
+        }
+    }
+    fn tag(self) -> &'static str {
+        match self {
+            Toast::Pressure(k) => k.as_str(),
+            Toast::Display => "display",
+        }
+    }
+}
+
+/// Toast ids per [`Toast`], so each replaces its own previous toast instead
+/// of stacking.
+static TOAST_ID: [std::sync::atomic::AtomicU32; 4] = [
+    std::sync::atomic::AtomicU32::new(0),
     std::sync::atomic::AtomicU32::new(0),
     std::sync::atomic::AtomicU32::new(0),
     std::sync::atomic::AtomicU32::new(0),
@@ -341,8 +369,8 @@ static TOAST_ID: [std::sync::atomic::AtomicU32; 3] = [
 /// carries the click as data, so a toast restored after a shell restart stays
 /// clickable, where a libnotify action cannot.  Returns false when that sender
 /// is not installed, leaving the libnotify path to handle it.
-fn omarchy_notify(kind: Kind, urgency: &str, summary: &str, body: &str, click: &[String]) -> bool {
-    let prev = TOAST_ID[kind.idx()].load(Ordering::Relaxed).to_string();
+fn omarchy_notify(toast: Toast, urgency: &str, summary: &str, body: &str, click: &[String]) -> bool {
+    let prev = TOAST_ID[toast.slot()].load(Ordering::Relaxed).to_string();
     let mut cmd = Command::new("omarchy-notification-send");
     cmd.args(["--app-name", "busywatch", "-u", urgency, "-r", &prev, "-p"]);
     cmd.arg(summary).arg(body).arg("--exec").args(click);
@@ -351,7 +379,7 @@ fn omarchy_notify(kind: Kind, urgency: &str, summary: &str, body: &str, click: &
         return false;
     }
     if let Ok(id) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
-        TOAST_ID[kind.idx()].store(id, Ordering::Relaxed);
+        TOAST_ID[toast.slot()].store(id, Ordering::Relaxed);
     }
     true
 }
@@ -367,7 +395,7 @@ fn omarchy_notify(kind: Kind, urgency: &str, summary: &str, body: &str, click: &
 /// versions.  The waiting notify-send lives in a background thread so the
 /// watch loop is never blocked.
 fn send_notification(
-    kind: Kind,
+    toast: Toast,
     urgency: &'static str,
     summary: &str,
     body: &str,
@@ -380,7 +408,7 @@ fn send_notification(
             format!("{} detail", exe_path()),
         ],
     };
-    if omarchy_notify(kind, urgency, summary, body, &click) {
+    if omarchy_notify(toast, urgency, summary, body, &click) {
         return;
     }
     let argv_hint = format!(
@@ -394,7 +422,7 @@ fn send_notification(
         "-a",
         "busywatch",
         "-h",
-        &format!("string:x-canonical-private-synchronous:busywatch-{}", kind.as_str()),
+        &format!("string:x-canonical-private-synchronous:busywatch-{}", toast.tag()),
         "-h",
         &argv_hint,
         "-A",
@@ -434,6 +462,9 @@ struct Watcher {
     last_sample: Option<Instant>,
     last_prune: Instant,
     tray: Option<tray::Tray>,
+    gpu: sample::GpuMeter,
+    drm: Option<drm::DrmWatch>,
+    last_drm_toast: Option<Instant>,
 }
 
 /// The UI's range buttons.  Snapping to one of these means the range the
@@ -487,14 +518,20 @@ impl Watcher {
     /// Returns true while any incident is active, so the caller re-checks at
     /// the faster cadence instead of waiting for the next kernel event.
     fn tick(&mut self) -> bool {
-        let r = Reading {
+        let mut r = Reading {
             psi: read_pressures(),
             mem: read_meminfo(),
             load1: load1(),
             power: sample::read_power(),
             clock: sample::read_cpu_clock(),
             thermal: sample::read_thermal(),
+            // Filled in below when a sample is due: the GPU figures are rates
+            // over the gap since the last one, and reading the meter on every
+            // trigger would shrink that gap to whatever the kernel woke us for.
+            gpu: sample::Gpu::default(),
         };
+
+        self.display_errors();
 
         // Closing comes first: an incident that just ended must not hold the
         // loop at the busy cadence for another round.
@@ -555,6 +592,7 @@ impl Watcher {
             }
             if sample_due {
                 self.last_sample = Some(Instant::now());
+                r.gpu = self.gpu.read();
                 let inc_id = KINDS.iter().find_map(|k| {
                     self.incidents[k.idx()].as_ref().and_then(|i| i.db_id)
                 });
@@ -600,6 +638,36 @@ impl Watcher {
             });
         }
         busy
+    }
+
+    /// Record whatever the display driver complained about since the last
+    /// round, and say so — once per cooldown, since a PSR fault fires
+    /// hundreds of times a minute and one toast is the whole message.
+    fn display_errors(&mut self) {
+        let Some(events) = self.drm.as_ref().map(|d| d.drain()) else { return };
+        if events.is_empty() {
+            return;
+        }
+        if let Some(db) = self.db.as_mut() {
+            if let Err(e) = db.record_drm_events(&events) {
+                log(&format!("history db write failed: {e}"));
+            }
+        }
+        let total: u64 = events.iter().map(|e| e.count).sum();
+        let body = drm::summarize(&events, self.cfg.top);
+        log(&format!("display driver: {total} error(s) — {}", body.replace('\n', " — ")));
+        let due = self.last_drm_toast.map_or(true, |t| t.elapsed().as_secs() >= self.cfg.cooldown);
+        if self.cfg.notify && due {
+            self.last_drm_toast = Some(Instant::now());
+            let url = self.cfg.web.as_deref().map(|a| web::ui_url(a, "cpu", 3600));
+            send_notification(
+                Toast::Display,
+                "critical",
+                "Display driver errors",
+                &format!("{body}\nThe screen may show artefacts until the driver recovers."),
+                url,
+            );
+        }
     }
 
     /// Where a click on this toast should land: the history UI, opened on the
@@ -665,7 +733,7 @@ impl Watcher {
             body.replace('\n', " — ")
         ));
         if self.cfg.notify {
-            send_notification(k, "critical", summary, &body, self.click_url(k, elapsed));
+            send_notification(Toast::Pressure(k), "critical", summary, &body, self.click_url(k, elapsed));
         }
     }
 
@@ -698,7 +766,7 @@ impl Watcher {
         );
         log(&format!("all clear — {body}"));
         if self.cfg.notify {
-            send_notification(k, "normal", summary, &body, self.click_url(k, inc.since.elapsed()));
+            send_notification(Toast::Pressure(k), "normal", summary, &body, self.click_url(k, inc.since.elapsed()));
         }
     }
 }
@@ -772,7 +840,13 @@ fn watch(cfg: Config) -> ! {
         last_sample: None,
         last_prune: Instant::now(),
         tray,
+        gpu: sample::GpuMeter::default(),
+        drm: None,
+        last_drm_toast: None,
     };
+    if w.cfg.drm {
+        w.drm = Some(drm::spawn());
+    }
 
     let triggers: Vec<(Kind, std::fs::File)> = [
         (Kind::Cpu, PSI_CPU),
@@ -1121,6 +1195,10 @@ fn cmd_detail(db_path: &Path) -> i32 {
     }
     if let Some(l) = sample::read_thermal().summary() {
         println!("heat  {l}");
+    }
+    let gpu = sample::GpuMeter::default().read_fresh(Duration::from_millis(500), Duration::ZERO);
+    if let Some(l) = gpu.summary() {
+        println!("gpu   {l}");
     }
 
     print!("\nsampling processes for 1s…");

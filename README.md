@@ -103,12 +103,16 @@ busywatch records into an SQLite database at
   charge/discharge state, the signed watts flowing, the watt-hours in the pack
   and its full mark, the negotiated USB-C mode and the charger's advertised
   ceiling where the firmware reports one) and **clock** (mean and
-  maximum CPU frequency, and the kernel's cumulative throttle counters); a row
+  maximum CPU frequency, and the kernel's cumulative throttle counters) and
+  **graphics** (GPU and package watts, how much of the time the render and
+  media engines were awake, the render clock, and the panel backlight — see
+  [Display and GPU](#display-and-gpu)); a row
   **per application** (every process
   summed by command name, so a browser's 20 renderers are one row); and rows
   for the individual processes behind the notable apps;
 * the same sample every `--poll-secs` (default 10 s) **while an incident is
   running**, so the history is dense exactly where it matters;
+* one row per display-driver error message, with how often it repeated;
 * one row per incident: kind, start, end, peak pressure, minimum free memory
   and the culprit process.
 
@@ -183,6 +187,9 @@ and the **watts** flowing through the battery — draw and charge drawn apart,
 so a laptop that suddenly runs the fan and the battery down at once shows both
 in one glance. The temperature axis is fixed at 100 °C rather than scaled to
 the range, so the height of the line means the same thing every time you look.
+Last comes the **GPU**: its watts, how busy the render engine was, and the
+backlight, with every display-driver error marked as a notch across all the
+charts.
 
 On a machine with a battery the charts are followed by a **charging card**:
 what is crossing the terminals right now in watts, amps and volts; **when it
@@ -320,6 +327,54 @@ snapshot out of `/api/overview` instead — the dot costs more on that machine,
 and nothing else changes. The plugin and the daemon do not have to be upgraded
 together.
 
+## Display and GPU
+
+A display driver that goes wrong makes the screen tear, smear or leave stale
+patches, and nothing in the pressures shows it: the CPU is calm and the GPU
+reads idle. What does show it is the kernel log, which fills with lines like
+`xe 0000:00:02.0: [drm] *ERROR* Timed out waiting for PSR Idle for re-enable`,
+often hundreds a minute. (PSR and Panel Replay are how a laptop panel saves
+power by holding a still frame itself; when the driver loses step with the
+panel on the way out of that state, this is what you see.)
+
+busywatch follows the kernel journal (`journalctl -k -f`, filtered in
+journalctl so it wakes only for these lines) and records every `[drm]
+*ERROR*`, every kernel warning raised from inside `drivers/gpu/drm/`, and every
+GPU hang. Repeats of one message fold into one row with a count. The first
+burst raises a **"Display driver errors"** toast naming the loudest messages,
+at most once per `--cooldown`; the UI marks where they fell on every chart and
+lists them, loudest first, under the incidents. Reading the journal needs
+membership of `wheel`, `adm` or `systemd-journal`; `--no-drm` turns it off.
+
+Next to it, each sample records what the graphics side was doing:
+
+| figure | where it comes from |
+|---|---|
+| GPU watts | RAPL `uncore` energy counter (`/sys/class/powercap/intel-rapl:*`), as a mean since the previous sample |
+| package watts | RAPL `package-0`, for scale |
+| render / media busy | xe `tile*/gt*/gtidle/idle_residency_ms` (i915: `gt/gt*/rc6_residency_ms`), as the share of the interval spent awake |
+| GPU clock | xe `freq0/act_freq` (i915: `rps_act_freq_mhz`) |
+| backlight | `/sys/class/backlight/*/actual_brightness` against its maximum |
+
+The RAPL counters are **root-only by default** because power readings can
+leak secrets (CVE-2020-8694). Without them busywatch still records everything
+else and leaves the watts empty. To give one group read access — here the
+desktop user's own group — a udev rule is enough:
+
+```
+# /etc/udev/rules.d/60-busywatch-rapl.rules
+SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", RUN+="/usr/bin/chgrp YOURGROUP /sys%p/energy_uj", RUN+="/usr/bin/chmod 0440 /sys%p/energy_uj"
+```
+
+```sh
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=powercap --action=add
+```
+
+That reopens the side channel to members of that group, which on a
+single-user laptop is you. AMD parts have no `uncore` domain, so there the
+GPU watts stay empty either way.
+
 ## Build & install
 
 ```sh
@@ -392,6 +447,7 @@ publish.
 | `--web [ADDR:]PORT` | off | serve the history UI while watching |
 | `--no-notify` | | log only, no desktop notification |
 | `--no-tray` | | no tray icon |
+| `--no-drm` | | don't follow the kernel journal for display-driver errors |
 | `--db PATH` | `~/.local/state/busywatch/history.db` | history database |
 | `--no-db` | | don't record history |
 

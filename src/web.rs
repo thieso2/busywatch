@@ -11,7 +11,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -166,7 +167,7 @@ impl Server {
         let Some(conn) = self.open() else {
             out.push_str(&format!(
                 "\"from\":{from},\"to\":{to},\"bucket\":60,\"now\":{now},\"metric\":{},\"live\":{},\
-                 \"error\":\"no history database\",\"series\":[],\"incidents\":[],\"hogs\":[],\"stack\":[]}}",
+                 \"error\":\"no history database\",\"series\":[],\"incidents\":[],\"drm\":[],\"drmMarks\":[],\"hogs\":[],\"stack\":[]}}",
                 json_str(metric),
                 live_json()
             ));
@@ -183,6 +184,8 @@ impl Server {
         let (first, last) = db::span(&conn);
         out.push_str(&format!("\"span\":{{\"first\":{first},\"last\":{last}}},"));
 
+        let drm: HashMap<i64, i64> =
+            db::drm_counts(&conn, from, to, bucket).unwrap_or_default().into_iter().collect();
         out.push_str("\"series\":[");
         if let Ok(rows) = db::series(&conn, from, to, bucket) {
             for (i, b) in rows.iter().enumerate() {
@@ -197,7 +200,10 @@ impl Server {
                       \"batE\":{},\"batEFull\":{},\"pdMax\":{},\
                       \"freq\":{},\"freqMax\":{},\
                       \"thr\":{},\"thrMs\":{},\
-                      \"temp\":{},\"tempMax\":{},\"fan\":{},\"fanMax\":{}}}",
+                      \"temp\":{},\"tempMax\":{},\"fan\":{},\"fanMax\":{},\
+                      \"gpuMw\":{},\"gpuMaxMw\":{},\"pkgMw\":{},\
+                      \"render\":{},\"renderMax\":{},\"media\":{},\
+                      \"gpuFreq\":{},\"backlight\":{},\"drm\":{}}}",
                     b.t,
                     json_num(b.cpu_avg),
                     json_num(b.cpu_max),
@@ -225,7 +231,16 @@ impl Server {
                     json_opt_num(b.cpu_temp_mc),
                     json_opt_num(b.cpu_temp_max_mc),
                     json_opt_num(b.fan_rpm),
-                    json_opt_num(b.fan_max_rpm)
+                    json_opt_num(b.fan_max_rpm),
+                    json_opt_num(b.gpu_mw),
+                    json_opt_num(b.gpu_max_mw),
+                    json_opt_num(b.pkg_mw),
+                    json_opt_num(b.render_busy),
+                    json_opt_num(b.render_busy_max),
+                    json_opt_num(b.media_busy),
+                    json_opt_num(b.gpu_freq_mhz),
+                    json_opt_num(b.backlight_pct),
+                    drm.get(&b.t).copied().unwrap_or(0)
                 ));
             }
         }
@@ -238,6 +253,38 @@ impl Server {
                     out.push(',');
                 }
                 out.push_str(&incident_json(r));
+            }
+        }
+        out.push_str("],");
+
+        // Error counts per bucket, on their own: a burst can land in a bucket
+        // with no sample row (the watcher was mid-restart), and would then
+        // have no row in the series to carry its marker.
+        out.push_str("\"drmMarks\":[");
+        let mut marks: Vec<_> = drm.iter().collect();
+        marks.sort();
+        for (i, (t, n)) in marks.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!("[{t},{n}]"));
+        }
+        out.push_str("],");
+
+        // Display-driver errors in the range, one entry per distinct message.
+        out.push_str("\"drm\":[");
+        if let Ok(rows) = db::drm_events(&conn, from, to, 50) {
+            for (i, e) in rows.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!(
+                    "{{\"first\":{},\"last\":{},\"msg\":{},\"count\":{}}}",
+                    e.first,
+                    e.last,
+                    json_str(&e.msg),
+                    e.count
+                ));
             }
         }
         out.push_str("],");
@@ -440,9 +487,19 @@ fn incident_json(r: &db::IncidentRow) -> String {
     )
 }
 
+/// The live view's own GPU meter: its rates cover the gap between two page
+/// refreshes, and it must not share a window with the watcher's history.
+static LIVE_GPU: Mutex<Option<sample::GpuMeter>> = Mutex::new(None);
+
 /// Live kernel figures — cheap enough to read on every refresh (no /proc
-/// sweep, so no visible cost).
+/// sweep, so no visible cost).  The GPU rates need two readings; a meter
+/// that has not been read for a while waits half a second for its second.
 fn live_json() -> String {
+    let gpu = {
+        let mut m = LIVE_GPU.lock().unwrap_or_else(|e| e.into_inner());
+        m.get_or_insert_with(sample::GpuMeter::default)
+            .read_fresh(Duration::from_millis(500), Duration::from_secs(120))
+    };
     let p = read_pressures();
     let m = read_meminfo();
     let pw = sample::read_power();
@@ -458,7 +515,9 @@ fn live_json() -> String {
           \"batEnergyUwh\":{},\"batEnergyFullUwh\":{},\"batEnergyDesignUwh\":{},\
           \"batVoltageUv\":{},\"batCycles\":{},\"pdMode\":{},\"chargerMaxUw\":{},\
           \"cpuFreqKhz\":{},\"cpuFreqMaxKhz\":{},\"throttleCount\":{},\"throttleMs\":{},\
-          \"cpuTempMc\":{},\"fanRpm\":{},\"fanMaxRpm\":{}}}",
+          \"cpuTempMc\":{},\"fanRpm\":{},\"fanMaxRpm\":{},\
+          \"gpuMw\":{},\"pkgMw\":{},\"renderBusy\":{},\"mediaBusy\":{},\
+          \"gpuFreqMhz\":{},\"backlightPct\":{}}}",
         json_num(p.cpu.avg10),
         json_num(p.cpu.avg60),
         json_num(p.cpu.avg300),
@@ -501,6 +560,12 @@ fn live_json() -> String {
         opt_i64(th.cpu_temp_mc),
         opt_i64(th.fan_rpm.map(|v| v as i64)),
         opt_i64(th.fan_max_rpm.map(|v| v as i64)),
+        opt_i64(gpu.gpu_mw),
+        opt_i64(gpu.pkg_mw),
+        json_opt_num(gpu.render_busy_pct),
+        json_opt_num(gpu.media_busy_pct),
+        opt_i64(gpu.freq_mhz.map(|v| v as i64)),
+        json_opt_num(gpu.backlight_pct),
     )
 }
 

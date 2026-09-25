@@ -35,6 +35,8 @@ Item {
   // Shaded like an incident, but saying something else: a throttled stretch is
   // the firmware holding the CPU back, not a busywatch incident.
   property var bands: []
+  // Display-driver errors: [{t, n}], moments rather than stretches.
+  property var marks: []
   property var recordedFrom: null
 
   // Either a plain string, or [{text, color}] when the title doubles as the
@@ -73,6 +75,7 @@ Item {
   onColorsChanged: canvas.requestPaint()
   onIncidentsChanged: canvas.requestPaint()
   onBandsChanged: canvas.requestPaint()
+  onMarksChanged: canvas.requestPaint()
   onMaxLChanged: canvas.requestPaint()
   onMaxRChanged: canvas.requestPaint()
   onFmtLChanged: canvas.requestPaint()
@@ -157,6 +160,20 @@ Item {
         shade(incs[i].started,
               incs[i].ended === null || incs[i].ended === undefined ? A.to : incs[i].ended,
               P.forKind(incs[i].kind))
+      }
+      // A hairline where the display driver complained, with a notch on top
+      // so a single one is still findable.
+      var mk = root.marks || []
+      var mc = P.drm || P.cpu
+      for (i = 0; i < mk.length; i++) {
+        if (mk[i].t < A.from || mk[i].t > A.to) continue
+        var mx = root.xt(mk[i].t)
+        ctx.strokeStyle = Qt.rgba(mc.r, mc.g, mc.b, 0.55)
+        ctx.lineWidth = 1.2
+        ctx.beginPath(); ctx.moveTo(mx, padT); ctx.lineTo(mx, padT + ih); ctx.stroke()
+        ctx.fillStyle = mc
+        ctx.beginPath(); ctx.moveTo(mx - 3, padT); ctx.lineTo(mx + 3, padT)
+        ctx.lineTo(mx, padT + 5); ctx.closePath(); ctx.fill()
       }
 
       // ---------------------------------------------------------------- axes

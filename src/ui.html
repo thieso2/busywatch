@@ -8,6 +8,7 @@
   --cpu:#e0503a; --mem:#3f7fd6; --io:#c88a1d; --load:#7a5bd0; --swap:#b0563f;
   --freq:#2f8f6f; --bat:#8a8f3a; --draw:#b5502a; --chg:#2f9e6e;
   --temp:#b83b5e; --fan:#1f7a8c;
+  --gpu:#3b6fb8; --busy:#8a5a1f; --bl:#9a9aa3; --drm:#d4145a;
   --grid:#eceef2; --hl:rgba(0,0,0,.05);
   --c0:#3f7fd6; --c1:#e0503a; --c2:#2f9e6e; --c3:#c88a1d; --c4:#7a5bd0;
   --c5:#159ba0; --c6:#d0567f; --c7:#7c8a99;
@@ -17,6 +18,7 @@
   --cpu:#ff7a5e; --mem:#63a8ff; --io:#e8b552; --load:#a48bff; --swap:#d97a5c;
   --freq:#5fc79e; --bat:#c8cf5e; --draw:#ff9457; --chg:#4cc38a;
   --temp:#ff8fab; --fan:#4fc3d9;
+  --gpu:#7fb0ff; --busy:#e0b070; --bl:#8a8f99; --drm:#ff4f8b;
   --grid:#20242b; --hl:rgba(255,255,255,.06);
   --c0:#63a8ff; --c1:#ff7a5e; --c2:#4cc38a; --c3:#e8b552; --c4:#a48bff;
   --c5:#3fc4c9; --c6:#ff86ab; --c7:#93a1b0;
@@ -50,6 +52,8 @@ svg{display:block;width:100%;overflow:visible;touch-action:none}
 .gridline{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges}
 .crosshair{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 3;pointer-events:none}
 .inc{opacity:.13}
+.drmmark{stroke:var(--drm);stroke-width:1.2;opacity:.55}
+.drmtip{fill:var(--drm)}
 .norec{fill:var(--dim);opacity:.05}
 /* A collapsed stretch of time, drawn as a seam in the timeline: a narrow
    notch cut down to the page colour, a dashed rule down its middle, and how
@@ -188,6 +192,14 @@ h3{font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;lett
     <div class="tw"><table id="incidents">
       <thead><tr><th>when</th><th>kind</th><th>duration</th><th>peak stall</th>
         <th>min free mem</th><th>culprit</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <section id="drmsec">
+    <div class="head"><h2>Display driver errors</h2><span class="sub" id="drmSub"></span></div>
+    <div class="tw"><table id="drm">
+      <thead><tr><th>message</th><th>count</th><th>first</th><th>last</th></tr></thead>
       <tbody></tbody>
     </table></div>
   </section>
@@ -466,6 +478,14 @@ function chart(host, opts){
     if (z < a) continue;
     s += `<rect class="inc" x="${X(a).toFixed(1)}" y="${PADT}" width="${Math.max(1.5, X(z)-X(a)).toFixed(1)}" height="${ih}" fill="var(--cpu)"/>`;
   }
+  // Display-driver errors are moments, not stretches: a hairline where they
+  // fired, with a notch on top so a single one is still findable.
+  for (const m of (opts.marks || [])){
+    if (m.t < from || m.t > to) continue;
+    const x = X(m.t).toFixed(1);
+    s += `<line class="drmmark" x1="${x}" x2="${x}" y1="${PADT}" y2="${PADT+ih}"/>`;
+    s += `<path class="drmtip" d="M${x},${PADT+5} l-3,-5 h6 z"/>`;
+  }
   for (const inc of incidents){
     const a = Math.max(from, inc.started), b = Math.min(to, inc.ended == null ? to : inc.ended);
     if (b < a) continue;
@@ -710,7 +730,8 @@ function render(){
   for (const [name, fn] of [["coverage", renderCoverage], ["gauges", () => renderGauges(d.live)],
                             ["charts", renderSystem], ["charging", renderCharging],
                             ["apps", renderHogs],
-                            ["incidents", renderIncidents], ["drilldown", renderDetailCharts]]){
+                            ["incidents", renderIncidents], ["display errors", renderDrm],
+                            ["drilldown", renderDetailCharts]]){
     try { fn(d); }
     catch (e){ console.error("busywatch: rendering " + name + " failed", e); }
   }
@@ -756,6 +777,14 @@ function renderGauges(l){
   if (l.fanRpm != null)
     gs.push(["fan", l.fanRpm ? `${Math.round(l.fanRpm)} rpm` : "off",
              l.fanMaxRpm ? l.fanRpm / l.fanMaxRpm * 100 : 0, "--fan"]);
+  // Graphics: the watts where the counters are readable, else how busy the
+  // render engine is — the share it spent awake is still worth a tile.
+  if (l.gpuMw != null)
+    gs.push(["gpu", `${(l.gpuMw / 1000).toFixed(2)}W`
+             + (l.renderBusy != null ? ` · ${pct(l.renderBusy)}` : ""),
+             l.renderBusy != null ? l.renderBusy : 0, "--gpu"]);
+  else if (l.renderBusy != null)
+    gs.push(["gpu busy", pct(l.renderBusy), l.renderBusy, "--gpu"]);
   if (l.batPct != null){
     // The label carries what the number cannot: charging on mains reads very
     // differently from the same percentage draining on an adapter that
@@ -923,15 +952,24 @@ function renderSystem(d){
     r.tempMaxC = r.tempMax == null ? null : r.tempMax / 1000;
   }
   const heatSeen = rows.some(r => r.temp != null || r.fan != null);
+  // Watts, not milliwatts, for the same reason as the degrees.
+  for (const r of rows){
+    r.gpuW = r.gpuMw == null ? null : r.gpuMw / 1000;
+    r.gpuMaxW = r.gpuMaxMw == null ? null : r.gpuMaxMw / 1000;
+  }
+  const marks = (d.drmMarks || []).map(([t, n]) => ({t: t + d.bucket / 2, n}));
+  const gpuSeen = marks.length > 0
+    || rows.some(r => r.gpuMw != null || r.render != null || r.backlight != null);
   // Heat sits under the clock rather than at the end: the throttled stretches
   // shaded on that chart are explained by the line directly below them.
   host.innerHTML = `<div id="c1"></div><div id="c2"></div><div id="c3"></div>`
     + (swapSeen ? `<div id="c4"></div>` : "")
     + (clockSeen ? `<div id="c5"></div>` : "")
     + (heatSeen ? `<div id="c7"></div>` : "")
-    + (wattsSeen ? `<div id="c6"></div>` : "");
+    + (wattsSeen ? `<div id="c6"></div>` : "")
+    + (gpuSeen ? `<div id="c8"></div>` : "");
   const common = {from: d.from, to: d.to, bucket: d.bucket, incidents: d.incidents,
-                  recordedFrom: d.span && d.span.first, axis: state.axis};
+                  recordedFrom: d.span && d.span.first, axis: state.axis, marks};
   chart($("#c1"), {...common, rows, h: 104, title: "cpu stall % · load",
     defs: [{key:"cpuMax",color:"--cpu",kind:"area",opacity:.13,width:.8,dash:"2 2"},
            {key:"cpu",color:"--cpu",kind:"area"},
@@ -983,6 +1021,23 @@ function renderSystem(d){
       defs: [{key:"wOut",color:"--draw",kind:"area"},
              {key:"wIn",color:"--chg",kind:"area"}],
       fmtL: w => w.toFixed(w < 10 ? 1 : 0) + "W", floorL: 5});
+  if (gpuSeen)
+    chart($("#c8"), {...common, rows, h: 92,
+      // The render engine's busy share and the backlight share one 0–100
+      // axis on the right; the watts get the left one to themselves, since
+      // an idle GPU draws a twentieth of a watt and would vanish beside the
+      // package.
+      title: '<tspan fill="var(--gpu)">gpu power</tspan>'
+           + ' \u00b7 <tspan fill="var(--busy)">render busy %</tspan>'
+           + ' \u00b7 <tspan fill="var(--bl)">backlight %</tspan> (right)'
+           + (marks.length ? ' \u00b7 <tspan fill="var(--drm)">\u25bc display errors</tspan>' : ""),
+      maxR: 100,
+      defs: [{key:"gpuMaxW",color:"--gpu",kind:"area",opacity:.12,width:.8,dash:"2 2"},
+             {key:"gpuW",color:"--gpu",kind:"area"},
+             {key:"render",color:"--busy",axis:"r",width:1.2},
+             {key:"backlight",color:"--bl",axis:"r",width:1,dash:"3 3"}],
+      fmtL: w => w.toFixed(w < 1 ? 2 : 1) + "W", floorL: 0.5,
+      fmtR: v => v.toFixed(0) + "%"});
   const hover = t => {
     const r = nearest(rows, t);
     if (!r) return null;
@@ -1000,10 +1055,14 @@ function renderSystem(d){
       ${r.fan == null ? "" : `<tr><td>fan</td><td>${r.fan ? `${Math.round(r.fan)} rpm` : "off"}${r.fanMax > r.fan ? ` <span class="muted">peak ${Math.round(r.fanMax)} rpm</span>` : ""}</td></tr>`}
       ${r.bat == null ? "" : `<tr><td>battery</td><td>${r.bat.toFixed(0)}%${r.batW ? ` <span class="muted">${r.batW < 0 ? "\u2193" : "\u2191"}${watts(r.batW)}</span>` : ""}${r.batE == null ? "" : ` <span class="muted">${wattHours(r.batE)}${r.batEFull ? ` of ${wattHours(r.batEFull)}` : ""}</span>`}</td></tr>`}
       ${r.pdMax == null ? "" : `<tr><td>charger</td><td>${watts(r.pdMax)} <span class="muted">rated</span></td></tr>`}
+      ${r.gpuMw == null ? "" : `<tr><td>gpu power</td><td>${(r.gpuMw/1000).toFixed(2)}W${r.pkgMw ? ` <span class="muted">of ${(r.pkgMw/1000).toFixed(1)}W package</span>` : ""}</td></tr>`}
+      ${r.render == null ? "" : `<tr><td>gpu busy</td><td>render ${pct(r.render)}${r.media != null ? ` · media ${pct(r.media)}` : ""}${r.gpuFreq ? ` <span class="muted">${Math.round(r.gpuFreq)} MHz</span>` : ""}</td></tr>`}
+      ${r.backlight == null ? "" : `<tr><td>backlight</td><td>${pct(r.backlight)}</td></tr>`}
+      ${r.drm ? `<tr><td>display errors</td><td style="color:var(--drm)">${r.drm}</td></tr>` : ""}
       ${r.ac == null ? "" : `<tr><td>power</td><td>${r.ac >= 0.5 ? "on AC" : "on battery"}${r.ac > 0 && r.ac < 1 ? ` <span class="muted">(changed in this bucket)</span>` : ""}</td></tr>`}
       </table>`};
   };
-  for (const id of ["#c1", "#c2", "#c3", "#c4", "#c5", "#c6", "#c7"])
+  for (const id of ["#c1", "#c2", "#c3", "#c4", "#c5", "#c6", "#c7", "#c8"])
     if ($(id)) wireHover($(id), hover);
   const inc = d.incidents.length;
   $("#sysSub").textContent = `${rows.length} points · ${dur(d.bucket)} each · `
@@ -1088,6 +1147,20 @@ function renderIncidents(d){
       <td>${i.minMemAvail == null ? "—" : bytes(i.minMemAvail)}</td>
       <td>${i.top || "<span class=muted>—</span>"}</td></tr>`;
   }).join("") || `<tr><td colspan="6" class="muted">no incidents recorded</td></tr>`;
+}
+
+// What the display driver complained about in the range, loudest first. The
+// kernel's own words, since they are what anyone searching a bug tracker
+// needs.
+function renderDrm(d){
+  const rows = d.drm || [];
+  const total = rows.reduce((a, e) => a + e.count, 0);
+  $("#drmSub").textContent = rows.length
+    ? `${total} in range · ${rows.length} distinct` : "none in range";
+  $("#drm tbody").innerHTML = rows.map(e => `<tr>
+      <td><i class="sw" style="background:var(--drm)"></i> ${esc(e.msg)}</td>
+      <td>${e.count}</td><td>${stamp(e.first)}</td><td>${stamp(e.last)}</td></tr>`).join("")
+    || `<tr><td colspan="4" class="muted">no display-driver errors recorded</td></tr>`;
 }
 
 // ---------------------------------------------------------------- drilldown

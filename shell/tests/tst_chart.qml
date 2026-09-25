@@ -111,4 +111,23 @@ TestCase {
     verify(line.visible, "which shows once a moment is hovered")
     fuzzyCompare(line.x, expected, 1)
   }
+
+  // A display-driver error is a moment: the chart must mark it where it fell,
+  // in the error colour, and leave the rest of the plot alone.
+  function test_a_display_error_is_marked_where_it_fell() {
+    var t = 30 * 60
+    chart.marks = [{ t: t, n: 12 }]
+    var x = Math.round(chart.xt(t))
+    var img
+    tryVerify(function () {
+      img = grabImage(chart)
+      var c = img.pixel(x, chart.padT + 1)
+      return Math.abs(c.r - scheme.drm.r) < 0.1 && Math.abs(c.g - scheme.drm.g) < 0.1
+    }, 2000, "the notch at the top of the plot is drawn in the error colour")
+    chart.marks = []
+    tryVerify(function () {
+      var c = grabImage(chart).pixel(x, chart.padT + 1)
+      return Math.abs(c.r - scheme.drm.r) > 0.1 || Math.abs(c.g - scheme.drm.g) > 0.1
+    }, 2000, "and goes away with the marks")
+  }
 }

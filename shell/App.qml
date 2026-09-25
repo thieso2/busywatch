@@ -103,6 +103,8 @@ Item {
       c.wIn = r.batW > 0 ? r.batW / 1e6 : null
       c.tempC = r.temp === null || r.temp === undefined ? null : r.temp / 1000
       c.tempMaxC = r.tempMax === null || r.tempMax === undefined ? null : r.tempMax / 1000
+      c.gpuW = r.gpuMw === null || r.gpuMw === undefined ? null : r.gpuMw / 1000
+      c.gpuMaxW = r.gpuMaxMw === null || r.gpuMaxMw === undefined ? null : r.gpuMaxMw / 1000
       out.push(c)
     }
     return out
@@ -119,6 +121,22 @@ Item {
   readonly property bool clockSeen: seen(function (r) { return r.freq !== null || r.bat !== null })
   readonly property bool wattsSeen: seen(function (r) { return r.wOut !== null || r.wIn !== null })
   readonly property bool heatSeen: seen(function (r) { return r.temp !== null || r.fan !== null })
+  readonly property bool gpuSeen: drmMarks.length > 0 || seen(function (r) {
+    return (r.gpuMw !== null && r.gpuMw !== undefined) || (r.render !== null && r.render !== undefined)
+      || (r.backlight !== null && r.backlight !== undefined)
+  })
+
+  // Display-driver errors per bucket, marked mid-bucket on every system chart.
+  // They come apart from the series: a burst can land in a bucket with no
+  // sample row to carry it.
+  readonly property var drmMarks: {
+    var out = []
+    if (!overview || !overview.drmMarks) return out
+    for (var i = 0; i < overview.drmMarks.length; i++)
+      out.push({ t: overview.drmMarks[i][0] + overview.bucket / 2, n: overview.drmMarks[i][1] })
+    return out
+  }
+  readonly property var drmEvents: overview && overview.drm ? overview.drm : []
 
   // Throttle counters are cumulative, so a bucket's `thr` is how many events
   // fell inside it: shade those buckets rather than plotting a count nobody can
@@ -249,6 +267,17 @@ Item {
     if (r.fan !== null && r.fan !== undefined)
       out.push({ k: "fan", v: (r.fan ? Math.round(r.fan) + " rpm" : "off")
         + (r.fanMax > r.fan ? "  peak " + Math.round(r.fanMax) + " rpm" : "") })
+    if (r.gpuMw !== null && r.gpuMw !== undefined)
+      out.push({ k: "gpu power", v: (r.gpuMw / 1000).toFixed(2) + "W"
+        + (r.pkgMw ? "  of " + (r.pkgMw / 1000).toFixed(1) + "W package" : "") })
+    if (r.render !== null && r.render !== undefined)
+      out.push({ k: "gpu busy", v: "render " + Fmt.pct(r.render)
+        + (r.media !== null && r.media !== undefined ? " · media " + Fmt.pct(r.media) : "")
+        + (r.gpuFreq ? "  " + Math.round(r.gpuFreq) + " MHz" : "") })
+    if (r.backlight !== null && r.backlight !== undefined)
+      out.push({ k: "backlight", v: Fmt.pct(r.backlight) })
+    if (r.drm)
+      out.push({ k: "display errors", v: String(r.drm) })
     if (r.bat !== null && r.bat !== undefined)
       out.push({ k: "battery", v: r.bat.toFixed(0) + "%"
         + (r.batW ? "  " + (r.batW < 0 ? "↓" : "↑") + Fmt.watts(r.batW) : "")
@@ -358,6 +387,14 @@ Item {
     if (l.fanRpm !== null && l.fanRpm !== undefined)
       g.push({ label: "fan", value: l.fanRpm ? Math.round(l.fanRpm) + " rpm" : "off",
                frac: l.fanMaxRpm ? l.fanRpm / l.fanMaxRpm * 100 : 0, color: pal.fan })
+    // Graphics: the watts where the counters are readable, else how busy the
+    // render engine is.
+    if (l.gpuMw !== null && l.gpuMw !== undefined)
+      g.push({ label: "gpu", value: (l.gpuMw / 1000).toFixed(2) + "W"
+                 + (l.renderBusy !== null && l.renderBusy !== undefined ? " · " + Fmt.pct(l.renderBusy) : ""),
+               frac: l.renderBusy || 0, color: pal.gpu })
+    else if (l.renderBusy !== null && l.renderBusy !== undefined)
+      g.push({ label: "gpu busy", value: Fmt.pct(l.renderBusy), frac: l.renderBusy, color: pal.gpu })
     if (l.batPct !== null && l.batPct !== undefined) {
       // The label carries what the number cannot: charging on mains reads very
       // differently from the same percentage draining on an adapter that cannot
@@ -628,7 +665,7 @@ Item {
               visible: root.rows.length > 0
               implicitHeight: Style.space(104)
               axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
-              incidents: root.incidents; recordedFrom: root.recordedFrom
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
               colors: pal; hoverU: root.hoverU
               title: "cpu stall % · load"
               fmtL: Fmt.pct
@@ -645,7 +682,7 @@ Item {
               visible: root.rows.length > 0
               implicitHeight: Style.space(104)
               axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
-              incidents: root.incidents; recordedFrom: root.recordedFrom
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
               colors: pal; hoverU: root.hoverU
               title: "memory used % · mem stall % (right)"
               maxL: 100; floorR: 5
@@ -661,7 +698,7 @@ Item {
               visible: root.rows.length > 0
               implicitHeight: Style.space(92)
               axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
-              incidents: root.incidents; recordedFrom: root.recordedFrom
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
               colors: pal; hoverU: root.hoverU
               title: "io stall %"
               fmtL: Fmt.pct
@@ -676,7 +713,7 @@ Item {
               visible: root.rows.length > 0 && root.swapSeen
               implicitHeight: Style.space(84)
               axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
-              incidents: root.incidents; recordedFrom: root.recordedFrom
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
               colors: pal; hoverU: root.hoverU
               title: "swap used"
               fmtL: Fmt.bytes; floorL: 1024
@@ -689,7 +726,7 @@ Item {
               visible: root.rows.length > 0 && root.clockSeen
               implicitHeight: Style.space(92)
               axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
-              incidents: root.incidents; recordedFrom: root.recordedFrom
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
               bands: root.throttleBands
               colors: pal; hoverU: root.hoverU
               title: "cpu clock · battery % (right)"
@@ -710,7 +747,7 @@ Item {
               visible: root.rows.length > 0 && root.heatSeen
               implicitHeight: Style.space(92)
               axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
-              incidents: root.incidents; recordedFrom: root.recordedFrom
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
               colors: pal; hoverU: root.hoverU
               title: "cpu temp · fan rpm (right)"
               // Fixed to 100°C rather than scaled to whatever happened: a CPU
@@ -731,7 +768,7 @@ Item {
               visible: root.rows.length > 0 && root.wattsSeen
               implicitHeight: Style.space(92)
               axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
-              incidents: root.incidents; recordedFrom: root.recordedFrom
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
               colors: pal; hoverU: root.hoverU
               // The title doubles as the legend: two bands, coloured in place,
               // so nobody has to guess which way round they are.
@@ -743,6 +780,34 @@ Item {
               floorL: 5
               defs: [{ key: "wOut", color: pal.draw, kind: "area" },
                      { key: "wIn", color: pal.chg, kind: "area" }]
+              onProbed: function (t, brk, sx, sy) { root.probe(t, brk, sx, sy, root.systemTip) }
+            }
+
+            // Render busy and backlight share the 0–100 axis on the right; the
+            // watts get the left to themselves, since an idle GPU draws a
+            // twentieth of a watt and would vanish beside the package.
+            Chart {
+              Layout.fillWidth: true
+              visible: root.rows.length > 0 && root.gpuSeen
+              implicitHeight: Style.space(92)
+              axis: root.axis; rows: root.rows; bucket: root.overview ? root.overview.bucket : 60
+              incidents: root.incidents; recordedFrom: root.recordedFrom; marks: root.drmMarks
+              colors: pal; hoverU: root.hoverU
+              titleRuns: [{ text: "gpu power", color: pal.gpu },
+                          { text: " · ", color: pal.dim },
+                          { text: "render busy %", color: pal.busy },
+                          { text: " · ", color: pal.dim },
+                          { text: "backlight %", color: pal.bl },
+                          { text: " (right)" + (root.drmMarks.length ? " · " : ""), color: pal.dim },
+                          { text: root.drmMarks.length ? "▼ display errors" : "", color: pal.drm }]
+              maxR: 100; floorL: 0.5
+              fmtL: function (w) { return w.toFixed(w < 1 ? 2 : 1) + "W" }
+              fmtR: function (v) { return v.toFixed(0) + "%" }
+              defs: [{ key: "gpuMaxW", color: pal.gpu, kind: "area", opacity: 0.12,
+                       width: 0.8, dash: [2, 2] },
+                     { key: "gpuW", color: pal.gpu, kind: "area" },
+                     { key: "render", color: pal.busy, axis: "r", width: 1.2 },
+                     { key: "backlight", color: pal.bl, axis: "r", width: 1, dash: [3, 3] }]
               onProbed: function (t, brk, sx, sy) { root.probe(t, brk, sx, sy, root.systemTip) }
             }
 
@@ -1260,6 +1325,63 @@ Item {
               }
               onActivated: function (i) {
                 if (i.top && root.service) root.service.select(i.top)
+              }
+            }
+          }
+
+          // ============================================== display driver errors
+          // The kernel's own words, loudest first: they are what anyone
+          // searching a bug tracker needs.
+          Section {
+            colors: pal
+            Layout.leftMargin: Style.space(16)
+            Layout.rightMargin: Style.space(16)
+            Layout.bottomMargin: Style.space(16)
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(10)
+              Text {
+                text: "Display driver errors"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                font.weight: Font.DemiBold
+                color: pal.ink
+              }
+              Text {
+                Layout.fillWidth: true
+                text: {
+                  var n = 0
+                  for (var i = 0; i < root.drmEvents.length; i++) n += root.drmEvents[i].count
+                  return root.drmEvents.length
+                    ? n + " in range · " + root.drmEvents.length + " distinct" : "none in range"
+                }
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                color: pal.dim
+              }
+            }
+
+            DataTable {
+              Layout.fillWidth: true
+              colors: pal
+              maxRows: 10
+              rows: root.drmEvents
+              emptyText: "no display-driver errors recorded"
+              columns: [
+                { key: "msg", title: "message", flex: 3, min: 220 },
+                { key: "count", title: "count", flex: 0.7, min: 70, align: "right" },
+                { key: "first", title: "first", flex: 1.2, min: 118, align: "right" },
+                { key: "last", title: "last", flex: 1.2, min: 118, align: "right" }
+              ]
+              cell: function (e, key) {
+                switch (key) {
+                case "msg": return { text: e.msg, swatch: pal.drm }
+                case "count": return { text: String(e.count) }
+                case "first": return { text: Fmt.stamp(e.first) }
+                case "last": return { text: Fmt.stamp(e.last) }
+                }
+                return { text: "" }
               }
             }
           }

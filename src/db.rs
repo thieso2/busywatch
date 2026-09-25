@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags};
 
-use crate::sample::{io_rate, top_by, Consumer, CpuClock, MemInfo, Power, Pressures, Thermal};
+use crate::drm::DrmEvent;
+use crate::sample::{io_rate, top_by, Consumer, CpuClock, Gpu, MemInfo, Power, Pressures, Thermal};
 use crate::util::unix_now;
 
 /// What kind of resource an incident is about.
@@ -73,6 +74,7 @@ pub struct Reading {
     pub power: Power,
     pub clock: CpuClock,
     pub thermal: Thermal,
+    pub gpu: Gpu,
 }
 
 fn ensure_columns(conn: &Connection, table: &str, cols: &[(&str, &str)]) -> rusqlite::Result<()> {
@@ -212,9 +214,12 @@ impl Db {
                                  ac_online, bat_pct, bat_status, bat_power_uw,
                                  bat_energy_uwh, bat_energy_full_uwh, pd_mode, charger_max_uw,
                                  cpu_freq_khz, cpu_freq_max_khz, throttle_count, throttle_ms,
-                                 cpu_temp_mc, fan_rpm)
+                                 cpu_temp_mc, fan_rpm,
+                                 gpu_mw, pkg_mw, gpu_render_busy, gpu_media_busy,
+                                 gpu_freq_mhz, backlight_pct)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
-                     ?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
+                     ?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,
+                     ?28,?29,?30,?31,?32,?33)",
             params![
                 incident_id,
                 ts,
@@ -243,6 +248,12 @@ impl Db {
                 r.clock.throttle_ms.map(|v| v as i64),
                 r.thermal.cpu_temp_mc,
                 r.thermal.fan_rpm.map(|v| v as i64),
+                r.gpu.gpu_mw,
+                r.gpu.pkg_mw,
+                r.gpu.render_busy_pct,
+                r.gpu.media_busy_pct,
+                r.gpu.freq_mhz.map(|v| v as i64),
+                r.gpu.backlight_pct,
             ],
         )?;
         let sid = tx.last_insert_rowid();
@@ -285,6 +296,19 @@ impl Db {
         Ok(sid)
     }
 
+    /// Store display-driver errors, one row per message per drain, carrying
+    /// how many times it fired between `ts` and `last_ts`.
+    pub fn record_drm_events(&mut self, events: &[DrmEvent]) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        for e in events {
+            tx.execute(
+                "INSERT INTO drm_event (ts, last_ts, msg, count) VALUES (?1, ?2, ?3, ?4)",
+                params![e.first, e.last, e.msg, e.count as i64],
+            )?;
+        }
+        tx.commit()
+    }
+
     /// Drop history older than `days`.  Per-pid rows go after `pid_days`
     /// instead: they are bulky and only useful as recent forensics, while the
     /// per-app rows carry the long record.  Returns rows removed.
@@ -297,6 +321,7 @@ impl Db {
         let mut n = self.conn.execute("DELETE FROM consumer WHERE ts < ?1", [pid_cutoff])?;
         n += self.conn.execute("DELETE FROM app_sample WHERE ts < ?1", [cutoff])?;
         n += self.conn.execute("DELETE FROM sample WHERE ts < ?1", [cutoff])?;
+        n += self.conn.execute("DELETE FROM drm_event WHERE ts < ?1", [cutoff])?;
         n += self.conn.execute(
             "DELETE FROM incident WHERE started < ?1 AND ended IS NOT NULL",
             [cutoff],
@@ -346,7 +371,23 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              -- Thermal: millidegrees C off the die sensor, and the fastest
              -- fan in rpm.  NULL where the machine exposes no such sensor —
              -- a VM, or a desktop with no tachometer.
-             cpu_temp_mc INTEGER, fan_rpm INTEGER
+             cpu_temp_mc INTEGER, fan_rpm INTEGER,
+             -- GPU: mean graphics and package power in mW since the previous
+             -- sample (RAPL uncore and package-0, NULL unless the counters
+             -- are readable), the share of that stretch the render and media
+             -- engines were awake, the render clock in MHz at the sample, and
+             -- the panel backlight as a share of its maximum.
+             gpu_mw INTEGER, pkg_mw INTEGER,
+             gpu_render_busy REAL, gpu_media_busy REAL,
+             gpu_freq_mhz INTEGER, backlight_pct REAL
+         );
+         -- Display-driver errors from the kernel journal, folded by message:
+         -- `count` repeats between ts and last_ts.
+         CREATE TABLE IF NOT EXISTS drm_event (
+             ts INTEGER NOT NULL,
+             last_ts INTEGER NOT NULL,
+             msg TEXT NOT NULL,
+             count INTEGER NOT NULL
          );
          CREATE TABLE IF NOT EXISTS app_sample (
              ts INTEGER NOT NULL,
@@ -404,6 +445,12 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             ("throttle_ms", "INTEGER"),
             ("cpu_temp_mc", "INTEGER"),
             ("fan_rpm", "INTEGER"),
+            ("gpu_mw", "INTEGER"),
+            ("pkg_mw", "INTEGER"),
+            ("gpu_render_busy", "REAL"),
+            ("gpu_media_busy", "REAL"),
+            ("gpu_freq_mhz", "INTEGER"),
+            ("backlight_pct", "REAL"),
         ],
     )?;
     ensure_columns(conn, "consumer", &[("ts", "INTEGER NOT NULL DEFAULT 0")])?;
@@ -420,7 +467,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS consumer_comm ON consumer(comm, ts);
          CREATE INDEX IF NOT EXISTS app_sample_ts ON app_sample(ts);
          CREATE INDEX IF NOT EXISTS app_sample_comm ON app_sample(comm, ts);
-         CREATE INDEX IF NOT EXISTS incident_started ON incident(started);",
+         CREATE INDEX IF NOT EXISTS incident_started ON incident(started);
+         CREATE INDEX IF NOT EXISTS drm_event_ts ON drm_event(ts);",
     )?;
     Ok(())
 }
@@ -544,6 +592,14 @@ pub struct Bucket {
     pub cpu_temp_max_mc: Option<f64>,
     pub fan_rpm: Option<f64>,
     pub fan_max_rpm: Option<f64>,
+    pub gpu_mw: Option<f64>,
+    pub gpu_max_mw: Option<f64>,
+    pub pkg_mw: Option<f64>,
+    pub render_busy: Option<f64>,
+    pub render_busy_max: Option<f64>,
+    pub media_busy: Option<f64>,
+    pub gpu_freq_mhz: Option<f64>,
+    pub backlight_pct: Option<f64>,
 }
 
 pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::Result<Vec<Bucket>> {
@@ -562,7 +618,10 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
                 MAX(throttle_count) - MIN(throttle_count),
                 MAX(throttle_ms) - MIN(throttle_ms),
                 AVG(cpu_temp_mc), MAX(cpu_temp_mc),
-                AVG(fan_rpm), MAX(fan_rpm)
+                AVG(fan_rpm), MAX(fan_rpm),
+                AVG(gpu_mw), MAX(gpu_mw), AVG(pkg_mw),
+                AVG(gpu_render_busy), MAX(gpu_render_busy), AVG(gpu_media_busy),
+                AVG(gpu_freq_mhz), AVG(backlight_pct)
            FROM sample
           WHERE ts BETWEEN ?1 AND ?2
           GROUP BY b ORDER BY b",
@@ -604,6 +663,51 @@ pub fn series(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::R
             cpu_temp_max_mc: r.get(25)?,
             fan_rpm: r.get(26)?,
             fan_max_rpm: r.get(27)?,
+            gpu_mw: r.get(28)?,
+            gpu_max_mw: r.get(29)?,
+            pkg_mw: r.get(30)?,
+            render_busy: r.get(31)?,
+            render_busy_max: r.get(32)?,
+            media_busy: r.get(33)?,
+            gpu_freq_mhz: r.get(34)?,
+            backlight_pct: r.get(35)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Display-driver errors per bucket over [from, to], as (bucket start,
+/// count).  Empty on a database older than the table.
+pub fn drm_counts(conn: &Connection, from: i64, to: i64, bucket: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
+    if !has_table(conn, "drm_event") {
+        return Ok(Vec::new());
+    }
+    let b = bucket.max(1);
+    let mut stmt = conn.prepare(
+        "SELECT (ts/?3)*?3 AS b, SUM(count) FROM drm_event
+          WHERE ts BETWEEN ?1 AND ?2 GROUP BY b ORDER BY b",
+    )?;
+    let rows = stmt.query_map(params![from, to, b], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Every distinct display-driver error in [from, to], loudest first, with
+/// when it first and last fired.
+pub fn drm_events(conn: &Connection, from: i64, to: i64, limit: usize) -> rusqlite::Result<Vec<DrmEvent>> {
+    if !has_table(conn, "drm_event") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT MIN(ts), MAX(last_ts), msg, SUM(count) FROM drm_event
+          WHERE ts BETWEEN ?1 AND ?2
+          GROUP BY msg ORDER BY SUM(count) DESC, msg LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![from, to, limit as i64], |r| {
+        Ok(DrmEvent {
+            first: r.get(0)?,
+            last: r.get(1)?,
+            msg: r.get(2)?,
+            count: r.get::<_, i64>(3)? as u64,
         })
     })?;
     rows.collect()
